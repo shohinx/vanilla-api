@@ -141,6 +141,43 @@ func TestUpdateInventory(t *testing.T) {
 	}
 }
 
+func TestUpdateItemImage(t *testing.T) {
+	requirePostgres(t)
+	srv := New()
+	t.Cleanup(func() { _ = srv.Close() })
+	if err := srv.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize() returned an error: %v", err)
+	}
+
+	imageURL := "/api/v1/images/menu/test-carrot-cake.jpg"
+	updated, err := srv.UpdateItemImage(context.Background(), "butter-croissant", imageURL)
+	if err != nil {
+		t.Fatalf("UpdateItemImage() returned an error: %v", err)
+	}
+	if updated.ItemID != "butter-croissant" || updated.ImageURL != imageURL || updated.UpdatedAt.IsZero() {
+		t.Fatalf("unexpected image update: %+v", updated)
+	}
+
+	current, err := srv.Menu(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, category := range current.Categories {
+		for _, item := range category.Items {
+			if item.ID == "butter-croissant" {
+				found = true
+				if item.ImageURL != imageURL {
+					t.Fatalf("updated image URL was not returned by the menu: %+v", item)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("updated menu item was not returned by the menu")
+	}
+}
+
 func TestCreateMenuItemsInOneTransaction(t *testing.T) {
 	requirePostgres(t)
 	srv := New()

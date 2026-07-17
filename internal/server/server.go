@@ -13,6 +13,7 @@ import (
 
 	"github.com/shohinx/vanilla-api/internal/database"
 	"github.com/shohinx/vanilla-api/internal/dub"
+	"github.com/shohinx/vanilla-api/internal/imagestore"
 )
 
 type Config struct {
@@ -22,16 +23,18 @@ type Config struct {
 	DubAPIKey      string
 	DubDomain      string
 	DubLinkKey     string
+	PublicBaseURL  string
 }
 
 type Server struct {
 	db     database.Service
 	dub    dub.Service
+	images imagestore.Service
 	config Config
 }
 
-func New(db database.Service, dubService dub.Service, config Config) *Server {
-	return &Server{db: db, dub: dubService, config: config}
+func New(db database.Service, dubService dub.Service, imageService imagestore.Service, config Config) *Server {
+	return &Server{db: db, dub: dubService, images: imageService, config: config}
 }
 
 func NewServer() (*http.Server, error) {
@@ -53,8 +56,20 @@ func NewServer() (*http.Server, error) {
 		DubAPIKey:      os.Getenv("DUB_API_KEY"),
 		DubDomain:      os.Getenv("DUB_DOMAIN"),
 		DubLinkKey:     envOrDefault("DUB_LINK_KEY", "menu"),
+		PublicBaseURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
 	}
-	service := New(db, dub.New(config.DubAPIKey), config)
+	imageService, err := imagestore.New(context.Background(), imagestore.Config{
+		Endpoint:  os.Getenv("IMAGE_S3_ENDPOINT"),
+		Region:    envOrDefault("IMAGE_S3_REGION", "us-east-1"),
+		AccessKey: os.Getenv("IMAGE_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("IMAGE_S3_SECRET_KEY"),
+		Bucket:    os.Getenv("IMAGE_S3_BUCKET"),
+	})
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	service := New(db, dub.New(config.DubAPIKey), imageService, config)
 	return &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
 		Handler:      service.RegisterRoutes(),

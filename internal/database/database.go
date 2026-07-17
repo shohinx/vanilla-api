@@ -28,6 +28,7 @@ type Service interface {
 	Categories(context.Context) ([]menu.MenuCategory, error)
 	CreateCategories(context.Context, []menu.NewCategory) ([]menu.MenuCategory, error)
 	UpdateInventory(context.Context, string, int) (menu.Inventory, error)
+	UpdateItemImage(context.Context, string, string) (menu.ItemImage, error)
 	CreateMenuItems(context.Context, []menu.NewItem) ([]menu.Item, error)
 	CreateOrder(context.Context, menu.SubmitOrderRequest, menu.Quote) (menu.Order, error)
 	Orders(context.Context, string) ([]menu.Order, error)
@@ -294,6 +295,24 @@ func (s *service) UpdateInventory(ctx context.Context, itemID string, quantity i
 	}
 	inventory.Available = inventory.Quantity > 0
 	return inventory, nil
+}
+
+func (s *service) UpdateItemImage(ctx context.Context, itemID, imageURL string) (menu.ItemImage, error) {
+	var image menu.ItemImage
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE menu_items
+		SET image_url = $2, updated_at = NOW()
+		WHERE id = $1 AND is_active = TRUE
+		RETURNING id, image_url, updated_at`, itemID, imageURL).Scan(
+		&image.ItemID, &image.ImageURL, &image.UpdatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return menu.ItemImage{}, ErrNotFound
+		}
+		return menu.ItemImage{}, fmt.Errorf("update item image: %w", err)
+	}
+	return image, nil
 }
 
 func (s *service) CreateMenuItems(ctx context.Context, newItems []menu.NewItem) ([]menu.Item, error) {

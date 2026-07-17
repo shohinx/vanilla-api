@@ -4,13 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/shohinx/vanilla-api/internal/database"
 	"github.com/shohinx/vanilla-api/internal/dub"
+	"github.com/shohinx/vanilla-api/internal/imagestore"
 	"github.com/shohinx/vanilla-api/internal/menu"
 )
 
@@ -20,6 +27,10 @@ type fakeDatabase struct {
 	inventory          menu.Inventory
 	updateItemID       string
 	updateQuantity     int
+	updatedImage       menu.ItemImage
+	updateImageItemID  string
+	updateImageURL     string
+	updateImageErr     error
 	createdOrder       menu.Order
 	orders             []menu.Order
 	updatedOrder       menu.Order
@@ -61,6 +72,17 @@ func (f *fakeDatabase) UpdateInventory(_ context.Context, itemID string, quantit
 	f.updateItemID = itemID
 	f.updateQuantity = quantity
 	return f.inventory, nil
+}
+
+func (f *fakeDatabase) UpdateItemImage(_ context.Context, itemID, imageURL string) (menu.ItemImage, error) {
+	f.updateImageItemID = itemID
+	f.updateImageURL = imageURL
+	if f.updateImageErr != nil {
+		return menu.ItemImage{}, f.updateImageErr
+	}
+	f.updatedImage.ItemID = itemID
+	f.updatedImage.ImageURL = imageURL
+	return f.updatedImage, nil
 }
 
 func (f *fakeDatabase) CreateMenuItems(_ context.Context, items []menu.NewItem) ([]menu.Item, error) {
@@ -108,6 +130,33 @@ type fakeDub struct {
 	retrieveErr error
 }
 
+type fakeImageStore struct {
+	putKey         string
+	putData        []byte
+	putSize        int64
+	putContentType string
+	putErr         error
+	getKey         string
+	getObject      imagestore.Object
+	getErr         error
+}
+
+func (f *fakeImageStore) Put(_ context.Context, key string, body io.Reader, size int64, contentType string) error {
+	f.putKey = key
+	f.putSize = size
+	f.putContentType = contentType
+	if f.putErr != nil {
+		return f.putErr
+	}
+	f.putData, _ = io.ReadAll(body)
+	return nil
+}
+
+func (f *fakeImageStore) Get(_ context.Context, key string) (imagestore.Object, error) {
+	f.getKey = key
+	return f.getObject, f.getErr
+}
+
 func (f *fakeDub) CreateMenuLink(context.Context, string, string, string) (dub.Link, error) {
 	return f.link, nil
 }
@@ -146,7 +195,7 @@ func testMenu() menu.Menu {
 }
 
 func newTestRouter(db *fakeDatabase) http.Handler {
-	return New(db, &fakeDub{}, Config{
+	return New(db, &fakeDub{}, nil, Config{
 		AdminAPIKey:    "test-secret",
 		MenuAppURL:     "https://menu.example.com",
 		AllowedOrigins: []string{"http://localhost:5173"},
@@ -154,13 +203,59 @@ func newTestRouter(db *fakeDatabase) http.Handler {
 }
 
 func newTestRouterWithDub(db *fakeDatabase, dubService *fakeDub) http.Handler {
-	return New(db, dubService, Config{
+	return New(db, dubService, nil, Config{
 		AdminAPIKey:    "test-secret",
 		MenuAppURL:     "https://menu.example.com",
 		AllowedOrigins: []string{"http://localhost:5173"},
 		DubAPIKey:      "dub_test",
 		DubLinkKey:     "menu",
 	}).RegisterRoutes()
+}
+
+func newTestRouterWithImages(db *fakeDatabase, imageService imagestore.Service) http.Handler {
+	return New(db, &fakeDub{}, imageService, Config{
+		AdminAPIKey:    "test-secret",
+		MenuAppURL:     "https://menu.example.com",
+		AllowedOrigins: []string{"http://localhost:5173"},
+		PublicBaseURL:  "https://api.example.com",
+	}).RegisterRoutes()
+}
+
+func imageUploadBody(t *testing.T, filename string, contents []byte) (*bytes.Buffer, string) {
+	t.Helper()
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(contents); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return body, writer.FormDataContentType()
+}
+
+func pngImage(t *testing.T, width, height int) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8((x * 255) / width),
+				G: uint8((y * 255) / height),
+				B: 120,
+				A: 255,
+			})
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
 }
 
 func TestMenuHandler(t *testing.T) {
@@ -178,6 +273,113 @@ func TestMenuHandler(t *testing.T) {
 	}
 	if response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("expected live menu response to disable caching")
+	}
+}
+
+func TestAdminUploadsImageToObjectStorage(t *testing.T) {
+	imageService := &fakeImageStore{}
+	imageData := pngImage(t, 64, 32)
+	body, contentType := imageUploadBody(t, "cake.png", imageData)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/images", body)
+	request.Header.Set("Content-Type", contentType)
+	request.Header.Set("X-Admin-Key", "test-secret")
+	response := httptest.NewRecorder()
+
+	newTestRouterWithImages(&fakeDatabase{}, imageService).ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", response.Code, response.Body.String())
+	}
+	if !validImageKey(imageService.putKey) || !strings.HasSuffix(imageService.putKey, ".webp") {
+		t.Fatalf("unexpected object key %q", imageService.putKey)
+	}
+	if imageService.putContentType != "image/webp" || imageService.putSize != int64(len(imageService.putData)) {
+		t.Fatalf("unexpected stored image: type=%q size=%d", imageService.putContentType, imageService.putSize)
+	}
+	config, format, err := image.DecodeConfig(bytes.NewReader(imageService.putData))
+	if err != nil {
+		t.Fatalf("stored image is not decodable: %v", err)
+	}
+	if format != "webp" || config.Width != 64 || config.Height != 32 {
+		t.Fatalf("unexpected optimized image: format=%q dimensions=%dx%d", format, config.Width, config.Height)
+	}
+	var result struct {
+		ImageURL     string `json:"image_url"`
+		ContentType  string `json:"content_type"`
+		Size         int64  `json:"size"`
+		OriginalSize int64  `json:"original_size"`
+		Width        int    `json:"width"`
+		Height       int    `json:"height"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ImageURL != "https://api.example.com/api/v1/images/"+imageService.putKey {
+		t.Fatalf("unexpected image URL %q", result.ImageURL)
+	}
+	if result.ContentType != "image/webp" || result.Size != imageService.putSize || result.OriginalSize != int64(len(imageData)) || result.Width != 64 || result.Height != 32 {
+		t.Fatalf("unexpected upload response: %+v", result)
+	}
+}
+
+func TestAdminImageUploadRejectsMalformedImage(t *testing.T) {
+	imageService := &fakeImageStore{}
+	imageData := append([]byte("\x89PNG\r\n\x1a\n"), []byte("not-a-valid-png")...)
+	body, contentType := imageUploadBody(t, "broken.png", imageData)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/images", body)
+	request.Header.Set("Content-Type", contentType)
+	request.Header.Set("X-Admin-Key", "test-secret")
+	response := httptest.NewRecorder()
+
+	newTestRouterWithImages(&fakeDatabase{}, imageService).ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected status 422, got %d: %s", response.Code, response.Body.String())
+	}
+	if imageService.putKey != "" {
+		t.Fatal("malformed image must not be uploaded")
+	}
+}
+
+func TestAdminImageUploadRejectsNonImage(t *testing.T) {
+	imageService := &fakeImageStore{}
+	body, contentType := imageUploadBody(t, "notes.txt", []byte("not an image"))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/images", body)
+	request.Header.Set("Content-Type", contentType)
+	request.Header.Set("X-Admin-Key", "test-secret")
+	response := httptest.NewRecorder()
+
+	newTestRouterWithImages(&fakeDatabase{}, imageService).ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("expected status 415, got %d: %s", response.Code, response.Body.String())
+	}
+	if imageService.putKey != "" {
+		t.Fatal("unsupported content must not be uploaded")
+	}
+}
+
+func TestPublicImageIsProxiedFromObjectStorage(t *testing.T) {
+	key := "menu/0123456789abcdef0123456789abcdef.jpg"
+	imageService := &fakeImageStore{getObject: imagestore.Object{
+		Body:          io.NopCloser(strings.NewReader("jpeg-data")),
+		ContentType:   "image/jpeg",
+		ContentLength: int64(len("jpeg-data")),
+		ETag:          "image-etag",
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/images/"+key, nil)
+	response := httptest.NewRecorder()
+
+	newTestRouterWithImages(&fakeDatabase{}, imageService).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if imageService.getKey != key || response.Body.String() != "jpeg-data" {
+		t.Fatalf("unexpected proxied image: key=%q body=%q", imageService.getKey, response.Body.String())
+	}
+	if response.Header().Get("Content-Type") != "image/jpeg" || response.Header().Get("ETag") != "\"image-etag\"" {
+		t.Fatalf("unexpected headers: %v", response.Header())
 	}
 }
 
@@ -303,6 +505,102 @@ func TestUpdateInventory(t *testing.T) {
 	}
 	if db.updateItemID != "latte" || db.updateQuantity != 0 {
 		t.Fatalf("unexpected update: item=%q quantity=%d", db.updateItemID, db.updateQuantity)
+	}
+}
+
+func TestUpdateItemImage(t *testing.T) {
+	db := &fakeDatabase{}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/carrot-cake/image", bytes.NewBufferString(`{"image_url":" https://api.example.com/api/v1/images/menu/new.jpg "}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Admin-Key", "test-secret")
+	response := httptest.NewRecorder()
+
+	newTestRouter(db).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
+	}
+	if db.updateImageItemID != "carrot-cake" || db.updateImageURL != "https://api.example.com/api/v1/images/menu/new.jpg" {
+		t.Fatalf("unexpected image update: item=%q image_url=%q", db.updateImageItemID, db.updateImageURL)
+	}
+	var result menu.ItemImage
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ItemID != "carrot-cake" || result.ImageURL != db.updateImageURL {
+		t.Fatalf("unexpected response: %+v", result)
+	}
+}
+
+func TestUpdateItemImageRequiresAdminKey(t *testing.T) {
+	db := &fakeDatabase{}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/carrot-cake/image", bytes.NewBufferString(`{"image_url":"/api/v1/images/menu/new.jpg"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	newTestRouter(db).ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d", response.Code)
+	}
+	if db.updateImageItemID != "" {
+		t.Fatal("database should not be called without an admin key")
+	}
+}
+
+func TestUpdateItemImageRequiresImageURLField(t *testing.T) {
+	db := &fakeDatabase{}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/carrot-cake/image", bytes.NewBufferString(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Admin-Key", "test-secret")
+	response := httptest.NewRecorder()
+
+	newTestRouter(db).ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestUpdateItemImageCanClearImage(t *testing.T) {
+	db := &fakeDatabase{}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/carrot-cake/image", bytes.NewBufferString(`{"image_url":""}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Admin-Key", "test-secret")
+	response := httptest.NewRecorder()
+
+	newTestRouter(db).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || db.updateImageURL != "" {
+		t.Fatalf("expected image to be cleared, got status=%d image_url=%q", response.Code, db.updateImageURL)
+	}
+}
+
+func TestUpdateItemImageRejectsInvalidURL(t *testing.T) {
+	db := &fakeDatabase{}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/carrot-cake/image", bytes.NewBufferString(`{"image_url":"not-a-url"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Admin-Key", "test-secret")
+	response := httptest.NewRecorder()
+
+	newTestRouter(db).ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected status 422, got %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestUpdateItemImageReturnsNotFound(t *testing.T) {
+	db := &fakeDatabase{updateImageErr: database.ErrNotFound}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/missing/image", bytes.NewBufferString(`{"image_url":"/api/v1/images/menu/new.jpg"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Admin-Key", "test-secret")
+	response := httptest.NewRecorder()
+
+	newTestRouter(db).ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d: %s", response.Code, response.Body.String())
 	}
 }
 

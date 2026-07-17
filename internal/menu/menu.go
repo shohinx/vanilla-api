@@ -49,6 +49,12 @@ type Item struct {
 	ModifierGroups    []ModifierGroup `json:"modifier_groups,omitempty"`
 }
 
+type ItemImage struct {
+	ItemID    string    `json:"item_id"`
+	ImageURL  string    `json:"image_url"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type ModifierGroup struct {
 	ID            string           `json:"id"`
 	Name          string           `json:"name"`

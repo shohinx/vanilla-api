@@ -1,10 +1,15 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-contrib/cors"
@@ -12,8 +17,12 @@ import (
 
 	"github.com/shohinx/vanilla-api/internal/database"
 	"github.com/shohinx/vanilla-api/internal/dub"
+	"github.com/shohinx/vanilla-api/internal/imageopt"
+	"github.com/shohinx/vanilla-api/internal/imagestore"
 	"github.com/shohinx/vanilla-api/internal/menu"
 )
+
+const maxImageBytes int64 = 50 << 20
 
 func (s *Server) RegisterRoutes() http.Handler {
 	router := gin.New()
@@ -33,20 +42,187 @@ func (s *Server) RegisterRoutes() http.Handler {
 	api.GET("/menu", s.menuHandler)
 	api.GET("/menu/qr", s.menuQRHandler)
 	api.GET("/menu/qr.png", s.menuQRImageHandler)
+	api.GET("/images/*key", s.imageHandler)
 	api.POST("/order-plans/quote", s.quoteHandler)
 	api.POST("/orders", s.submitOrderHandler)
 
 	admin := api.Group("/admin")
 	admin.Use(s.requireAdminKey())
 	admin.PATCH("/items/:id/inventory", s.updateInventoryHandler)
+	admin.PATCH("/items/:id/image", s.updateItemImageHandler)
 	admin.GET("/menu/categories", s.menuCategoriesHandler)
 	admin.POST("/menu/categories", s.createMenuCategoriesHandler)
 	admin.POST("/menu/items", s.createMenuItemsHandler)
+	admin.POST("/images", s.uploadImageHandler)
 	admin.GET("/orders", s.adminOrdersHandler)
 	admin.PATCH("/orders/:id/status", s.updateOrderStatusHandler)
 	admin.POST("/menu/qr", s.provisionMenuQRHandler)
 
 	return router
+}
+
+func (s *Server) uploadImageHandler(c *gin.Context) {
+	if s.images == nil {
+		writeError(c, http.StatusServiceUnavailable, "image_storage_not_configured", "image storage is not configured", nil)
+		return
+	}
+
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxImageBytes+(1<<20))
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		var sizeError *http.MaxBytesError
+		if errors.As(err, &sizeError) {
+			writeError(c, http.StatusRequestEntityTooLarge, "image_too_large", "source images may not exceed 50 MiB", nil)
+			return
+		}
+		writeError(c, http.StatusBadRequest, "invalid_image_upload", "a multipart file field named file is required", nil)
+		return
+	}
+	if fileHeader.Size <= 0 {
+		writeError(c, http.StatusUnprocessableEntity, "empty_image", "the uploaded image is empty", nil)
+		return
+	}
+	if fileHeader.Size > maxImageBytes {
+		writeError(c, http.StatusRequestEntityTooLarge, "image_too_large", "source images may not exceed 50 MiB", nil)
+		return
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_image_upload", "the uploaded image could not be opened", nil)
+		return
+	}
+	defer file.Close()
+
+	var header [512]byte
+	headerSize, err := io.ReadFull(file, header[:])
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		writeError(c, http.StatusBadRequest, "invalid_image_upload", "the uploaded image could not be read", nil)
+		return
+	}
+	contentType := http.DetectContentType(header[:headerSize])
+	_, supported := imageExtension(contentType)
+	if !supported {
+		writeError(c, http.StatusUnsupportedMediaType, "unsupported_image_type", "only JPEG, PNG, and WebP images are supported", nil)
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeError(c, http.StatusBadRequest, "invalid_image_upload", "the uploaded image could not be read", nil)
+		return
+	}
+	optimized, err := imageopt.Optimize(file)
+	if errors.Is(err, imageopt.ErrTooManyPixels) {
+		writeError(c, http.StatusUnprocessableEntity, "image_dimensions_too_large", "images may not exceed 40 megapixels", nil)
+		return
+	}
+	if errors.Is(err, imageopt.ErrInvalidImage) {
+		writeError(c, http.StatusUnprocessableEntity, "invalid_image", "the uploaded file is not a valid JPEG, PNG, or WebP image", nil)
+		return
+	}
+	if errors.Is(err, imageopt.ErrCannotCompress) {
+		writeError(c, http.StatusUnprocessableEntity, "image_could_not_be_compressed", "the image could not be compressed below 2 MiB", nil)
+		return
+	}
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "image_optimization_failed", "the image could not be optimized", nil)
+		return
+	}
+
+	key, err := newImageKey(".webp")
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "image_key_failed", "an image key could not be generated", nil)
+		return
+	}
+	optimizedSize := int64(len(optimized.Data))
+	if err := s.images.Put(c.Request.Context(), key, bytes.NewReader(optimized.Data), optimizedSize, "image/webp"); err != nil {
+		writeError(c, http.StatusBadGateway, "image_upload_failed", "the image could not be stored", nil)
+		return
+	}
+
+	imagePath := "/api/v1/images/" + key
+	imageURL := imagePath
+	if s.config.PublicBaseURL != "" {
+		imageURL = s.config.PublicBaseURL + imagePath
+	}
+	c.JSON(http.StatusCreated, gin.H{
+		"key":             key,
+		"image_url":       imageURL,
+		"content_type":    "image/webp",
+		"size":            optimizedSize,
+		"original_size":   fileHeader.Size,
+		"original_width":  optimized.OriginalWidth,
+		"original_height": optimized.OriginalHeight,
+		"width":           optimized.Width,
+		"height":          optimized.Height,
+	})
+}
+
+func (s *Server) imageHandler(c *gin.Context) {
+	if s.images == nil {
+		writeError(c, http.StatusServiceUnavailable, "image_storage_not_configured", "image storage is not configured", nil)
+		return
+	}
+	key := strings.TrimPrefix(c.Param("key"), "/")
+	if !validImageKey(key) {
+		writeError(c, http.StatusNotFound, "image_not_found", "image was not found", nil)
+		return
+	}
+
+	object, err := s.images.Get(c.Request.Context(), key)
+	if err != nil {
+		if errors.Is(err, imagestore.ErrNotFound) {
+			writeError(c, http.StatusNotFound, "image_not_found", "image was not found", nil)
+			return
+		}
+		writeError(c, http.StatusBadGateway, "image_unavailable", "the image could not be loaded", nil)
+		return
+	}
+	defer object.Body.Close()
+
+	headers := map[string]string{"Cache-Control": "public, max-age=31536000, immutable"}
+	if object.ETag != "" {
+		headers["ETag"] = "\"" + object.ETag + "\""
+	}
+	c.DataFromReader(http.StatusOK, object.ContentLength, object.ContentType, object.Body, headers)
+}
+
+func imageExtension(contentType string) (string, bool) {
+	switch contentType {
+	case "image/jpeg":
+		return ".jpg", true
+	case "image/png":
+		return ".png", true
+	case "image/webp":
+		return ".webp", true
+	default:
+		return "", false
+	}
+}
+
+func newImageKey(extension string) (string, error) {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return "menu/" + hex.EncodeToString(random) + extension, nil
+}
+
+func validImageKey(key string) bool {
+	if !strings.HasPrefix(key, "menu/") {
+		return false
+	}
+	name := strings.TrimPrefix(key, "menu/")
+	if strings.Contains(name, "/") {
+		return false
+	}
+	for _, extension := range []string{".jpg", ".png", ".webp"} {
+		if strings.HasSuffix(name, extension) {
+			encoded := strings.TrimSuffix(name, extension)
+			decoded, err := hex.DecodeString(encoded)
+			return err == nil && len(decoded) == 16
+		}
+	}
+	return false
 }
 
 func (s *Server) serviceHandler(c *gin.Context) {
@@ -328,6 +504,47 @@ func (s *Server) updateInventoryHandler(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, inventory)
+}
+
+func (s *Server) updateItemImageHandler(c *gin.Context) {
+	var request struct {
+		ImageURL *string `json:"image_url"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil || request.ImageURL == nil {
+		writeError(c, http.StatusBadRequest, "invalid_request", "image_url is required", nil)
+		return
+	}
+
+	imageURL := strings.TrimSpace(*request.ImageURL)
+	if len(imageURL) > 2048 || !validMenuImageURL(imageURL) {
+		writeError(c, http.StatusUnprocessableEntity, "invalid_image_url", "image_url must be empty, an absolute HTTP(S) URL, or a root-relative path", nil)
+		return
+	}
+
+	image, err := s.db.UpdateItemImage(c.Request.Context(), c.Param("id"), imageURL)
+	if err != nil {
+		if errors.Is(err, database.ErrNotFound) {
+			writeError(c, http.StatusNotFound, "item_not_found", "menu item was not found", nil)
+			return
+		}
+		writeError(c, http.StatusInternalServerError, "image_update_failed", "menu item image could not be updated", nil)
+		return
+	}
+	c.JSON(http.StatusOK, image)
+}
+
+func validMenuImageURL(value string) bool {
+	if value == "" {
+		return true
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil {
+		return false
+	}
+	if parsed.IsAbs() {
+		return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+	}
+	return strings.HasPrefix(parsed.Path, "/") && !strings.HasPrefix(value, "//")
 }
 
 func (s *Server) createMenuItemsHandler(c *gin.Context) {

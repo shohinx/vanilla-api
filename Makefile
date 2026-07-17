@@ -1,5 +1,11 @@
 # Simple Makefile for a Go project
 
+ENV_FILE ?= .env
+IMAGE_S3_REGION ?= us-east-1
+IMAGE_S3_BUCKET ?= menu
+
+-include $(ENV_FILE)
+
 # Build the application
 all: build test
 
@@ -7,11 +13,14 @@ build:
 	@echo "Building..."
 	
 	
-	@go build -o vanilla-api cmd/api/main.go
+	@go build -mod=mod -o vanilla-api cmd/api/main.go
 
 # Run the application
 run:
-	@go run cmd/api/main.go
+	@if [ -f "$(ENV_FILE)" ]; then \
+		set -a; . "./$(ENV_FILE)"; set +a; \
+	fi; \
+	go run -mod=mod cmd/api/main.go
 # Create DB container
 docker-run:
 	@if docker compose up --build 2>/dev/null; then \
@@ -33,11 +42,15 @@ docker-down:
 # Test the application
 test:
 	@echo "Testing..."
-	@go test ./... -v
+	@go test -mod=mod ./... -v
 # Integrations Tests for the application
 itest:
 	@echo "Running integration tests..."
-	@go test ./internal/database -v
+	@go test -mod=mod ./internal/database -v
+
+# Check access to the existing bucket without creating or deleting anything.
+seaweed-check:
+	@ENV_FILE="$(ENV_FILE)" ./scripts/check-seaweed.sh
 
 # Clean the binary
 clean:
@@ -61,4 +74,5 @@ watch:
             fi; \
         fi
 
-.PHONY: all build run test clean watch docker-run docker-down itest
+.PHONY: all build run test clean watch docker-run docker-down itest \
+	seaweed-check
