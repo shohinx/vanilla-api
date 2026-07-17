@@ -1,0 +1,15 @@
+services:
+  vanilla_api_db:
+    image: postgres:latest
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${BLUEPRINT_DB_DATABASE:-vanilla_api}
+      POSTGRES_USER: ${BLUEPRINT_DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${BLUEPRINT_DB_PASSWORD:-postgres}
+    ports:
+      - "${BLUEPRINT_DB_PORT:-5432}:5432"
+    volumes:
+      - vanilla_api_db_data:/var/lib/postgresql/data
+
+volumes:
+  vanilla_api_db_data:
