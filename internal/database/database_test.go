@@ -10,7 +10,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/shohinx/vanilla-api/internal/menu"
+	"github.com/shohinx/vanilla-api/internal/sdk/models"
 )
 
 var postgresAvailable bool
@@ -186,7 +186,7 @@ func TestCreateMenuItemsInOneTransaction(t *testing.T) {
 		t.Fatalf("Initialize() returned an error: %v", err)
 	}
 
-	items, err := srv.CreateMenuItems(context.Background(), []menu.NewItem{
+	items, err := srv.CreateMenuItems(context.Background(), []models.NewItem{
 		{
 			ID: "test-carrot-cake", CategoryID: "cakes", Name: "Test Carrot Cake",
 			Type: "cake", PriceCents: 750, Currency: "USD", Quantity: 4,
@@ -194,9 +194,9 @@ func TestCreateMenuItemsInOneTransaction(t *testing.T) {
 		{
 			ID: "test-flat-white", CategoryID: "drinks", Name: "Test Flat White",
 			Type: "drink", PriceCents: 525, Currency: "USD", Quantity: 20,
-			ModifierGroups: []menu.NewModifierGroup{{
+			ModifierGroups: []models.NewModifierGroup{{
 				ID: "test-flat-white-milk", Name: "Milk", MinSelections: 1, MaxSelections: 1,
-				Options: []menu.NewModifierOption{{
+				Options: []models.NewModifierOption{{
 					ID: "test-flat-white-whole", Name: "Whole milk",
 				}},
 			}},
@@ -207,6 +207,9 @@ func TestCreateMenuItemsInOneTransaction(t *testing.T) {
 	}
 	if len(items) != 2 || len(items[1].ModifierGroups) != 1 {
 		t.Fatalf("unexpected created items: %+v", items)
+	}
+	if items[0].ImageURL != "" {
+		t.Fatalf("expected an item created without an image to have an empty image URL, got %q", items[0].ImageURL)
 	}
 
 	current, err := srv.Menu(context.Background(), true)
@@ -226,7 +229,7 @@ func TestCreateAndListCustomCategories(t *testing.T) {
 		t.Fatalf("Initialize() returned an error: %v", err)
 	}
 
-	created, err := srv.CreateCategories(context.Background(), []menu.NewCategory{{
+	created, err := srv.CreateCategories(context.Background(), []models.NewCategory{{
 		ID: "test-cold-beverages", Name: "Test Cold Beverages",
 		Description: "Iced drinks", SortOrder: 50,
 	}})
@@ -265,15 +268,15 @@ func TestOrderInventoryChangesOnlyWhenMarkedSold(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeQuantity := itemQuantity(t, before, "chocolate-cake-slice")
-	quote := menu.Quote{
+	quote := models.Quote{
 		Currency: "USD", SubtotalCents: 775,
-		Items: []menu.QuoteLineItem{{
+		Items: []models.QuoteLineItem{{
 			ItemID: "chocolate-cake-slice", Name: "Chocolate Cake Slice",
 			Quantity: 1, UnitPriceCents: 775, LineTotalCents: 775,
 		}},
 	}
-	order, err := srv.CreateOrder(context.Background(), menu.SubmitOrderRequest{
-		CustomerName: "Maya", Items: []menu.QuoteItemRequest{{ItemID: "chocolate-cake-slice", Quantity: 1}},
+	order, err := srv.CreateOrder(context.Background(), models.SubmitOrderRequest{
+		CustomerName: "Maya", Items: []models.QuoteItemRequest{{ItemID: "chocolate-cake-slice", Quantity: 1}},
 	}, quote)
 	if err != nil {
 		t.Fatalf("CreateOrder() returned an error: %v", err)
@@ -306,7 +309,7 @@ func TestOrderInventoryChangesOnlyWhenMarkedSold(t *testing.T) {
 	}
 }
 
-func itemQuantity(t *testing.T, current menu.Menu, itemID string) int {
+func itemQuantity(t *testing.T, current models.Menu, itemID string) int {
 	t.Helper()
 	for _, category := range current.Categories {
 		for _, item := range category.Items {

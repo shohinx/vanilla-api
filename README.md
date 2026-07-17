@@ -54,7 +54,7 @@ curl -X POST http://localhost:8080/api/v1/admin/images \
   -F "file=@carrot-cake.jpg"
 ```
 
-The response contains the value to pass as `image_url` when creating a menu item:
+The response contains an `image_url` that can be supplied when creating a menu item or attached later through the item image route. The field is optional when creating an item:
 
 ```json
 {

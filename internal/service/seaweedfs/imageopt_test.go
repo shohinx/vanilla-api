@@ -1,4 +1,4 @@
-package imageopt
+package seaweedfs
 
 import (
 	"bytes"

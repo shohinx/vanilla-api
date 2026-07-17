@@ -9,17 +9,16 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 
 	"github.com/shohinx/vanilla-api/internal/database"
-	"github.com/shohinx/vanilla-api/internal/dub"
-	"github.com/shohinx/vanilla-api/internal/imageopt"
-	"github.com/shohinx/vanilla-api/internal/imagestore"
 	"github.com/shohinx/vanilla-api/internal/menu"
+	"github.com/shohinx/vanilla-api/internal/sdk/models"
+	"github.com/shohinx/vanilla-api/internal/service/dub"
+	"github.com/shohinx/vanilla-api/internal/service/seaweedfs"
 )
 
 const maxImageBytes int64 = 50 << 20
@@ -110,16 +109,16 @@ func (s *Server) uploadImageHandler(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_image_upload", "the uploaded image could not be read", nil)
 		return
 	}
-	optimized, err := imageopt.Optimize(file)
-	if errors.Is(err, imageopt.ErrTooManyPixels) {
+	optimized, err := seaweedfs.Optimize(file)
+	if errors.Is(err, seaweedfs.ErrTooManyPixels) {
 		writeError(c, http.StatusUnprocessableEntity, "image_dimensions_too_large", "images may not exceed 40 megapixels", nil)
 		return
 	}
-	if errors.Is(err, imageopt.ErrInvalidImage) {
+	if errors.Is(err, seaweedfs.ErrInvalidImage) {
 		writeError(c, http.StatusUnprocessableEntity, "invalid_image", "the uploaded file is not a valid JPEG, PNG, or WebP image", nil)
 		return
 	}
-	if errors.Is(err, imageopt.ErrCannotCompress) {
+	if errors.Is(err, seaweedfs.ErrCannotCompress) {
 		writeError(c, http.StatusUnprocessableEntity, "image_could_not_be_compressed", "the image could not be compressed below 2 MiB", nil)
 		return
 	}
@@ -170,7 +169,7 @@ func (s *Server) imageHandler(c *gin.Context) {
 
 	object, err := s.images.Get(c.Request.Context(), key)
 	if err != nil {
-		if errors.Is(err, imagestore.ErrNotFound) {
+		if errors.Is(err, seaweedfs.ErrNotFound) {
 			writeError(c, http.StatusNotFound, "image_not_found", "image was not found", nil)
 			return
 		}
@@ -261,7 +260,7 @@ func (s *Server) menuHandler(c *gin.Context) {
 }
 
 func (s *Server) quoteHandler(c *gin.Context) {
-	var request menu.QuoteRequest
+	var request models.QuoteRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be valid JSON", nil)
 		return
@@ -274,7 +273,7 @@ func (s *Server) quoteHandler(c *gin.Context) {
 	}
 	quote, err := menu.BuildQuote(current, request)
 	if err != nil {
-		var validationErrors menu.ValidationErrors
+		var validationErrors models.ValidationErrors
 		if errors.As(err, &validationErrors) {
 			writeError(c, http.StatusUnprocessableEntity, "invalid_order_plan", err.Error(), validationErrors)
 			return
@@ -287,7 +286,7 @@ func (s *Server) quoteHandler(c *gin.Context) {
 }
 
 func (s *Server) submitOrderHandler(c *gin.Context) {
-	var request menu.SubmitOrderRequest
+	var request models.SubmitOrderRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be valid JSON", nil)
 		return
@@ -308,9 +307,9 @@ func (s *Server) submitOrderHandler(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "menu_unavailable", "the live menu could not be loaded", nil)
 		return
 	}
-	quote, err := menu.BuildQuote(current, menu.QuoteRequest{Items: request.Items})
+	quote, err := menu.BuildQuote(current, models.QuoteRequest{Items: request.Items})
 	if err != nil {
-		var validationErrors menu.ValidationErrors
+		var validationErrors models.ValidationErrors
 		if errors.As(err, &validationErrors) {
 			writeError(c, http.StatusUnprocessableEntity, "invalid_order", err.Error(), validationErrors)
 			return
@@ -453,7 +452,7 @@ func (s *Server) provisionMenuQRHandler(c *gin.Context) {
 	c.JSON(http.StatusCreated, link)
 }
 
-func (s *Server) currentMenuQR(ctx context.Context) (dub.Link, error) {
+func (s *Server) currentMenuQR(ctx context.Context) (models.Link, error) {
 	stored, storedErr := s.db.MenuQR(ctx)
 	if s.config.DubAPIKey == "" {
 		return stored, storedErr
@@ -463,7 +462,7 @@ func (s *Server) currentMenuQR(ctx context.Context) (dub.Link, error) {
 	if storedErr == nil {
 		linkID = stored.ID
 	} else if !errors.Is(storedErr, database.ErrNotFound) {
-		return dub.Link{}, storedErr
+		return models.Link{}, storedErr
 	}
 	current, err := s.dub.RetrieveMenuLink(ctx, linkID)
 	if err != nil {
@@ -471,12 +470,12 @@ func (s *Server) currentMenuQR(ctx context.Context) (dub.Link, error) {
 			return stored, nil
 		}
 		if errors.Is(err, dub.ErrNotFound) {
-			return dub.Link{}, database.ErrNotFound
+			return models.Link{}, database.ErrNotFound
 		}
-		return dub.Link{}, err
+		return models.Link{}, err
 	}
 	if err := s.db.SaveMenuQR(ctx, current); err != nil {
-		return dub.Link{}, err
+		return models.Link{}, err
 	}
 	return current, nil
 }
@@ -516,7 +515,7 @@ func (s *Server) updateItemImageHandler(c *gin.Context) {
 	}
 
 	imageURL := strings.TrimSpace(*request.ImageURL)
-	if len(imageURL) > 2048 || !validMenuImageURL(imageURL) {
+	if len(imageURL) > 2048 || !menu.ValidImageURL(imageURL) {
 		writeError(c, http.StatusUnprocessableEntity, "invalid_image_url", "image_url must be empty, an absolute HTTP(S) URL, or a root-relative path", nil)
 		return
 	}
@@ -533,29 +532,15 @@ func (s *Server) updateItemImageHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, image)
 }
 
-func validMenuImageURL(value string) bool {
-	if value == "" {
-		return true
-	}
-	parsed, err := url.ParseRequestURI(value)
-	if err != nil {
-		return false
-	}
-	if parsed.IsAbs() {
-		return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
-	}
-	return strings.HasPrefix(parsed.Path, "/") && !strings.HasPrefix(value, "//")
-}
-
 func (s *Server) createMenuItemsHandler(c *gin.Context) {
-	var request []menu.NewItem
+	var request []models.NewItem
 	if err := c.ShouldBindJSON(&request); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be a JSON array of menu items", nil)
 		return
 	}
 	items, err := menu.NormalizeAndValidateNewItems(request)
 	if err != nil {
-		var validationErrors menu.ValidationErrors
+		var validationErrors models.ValidationErrors
 		if errors.As(err, &validationErrors) {
 			writeError(c, http.StatusUnprocessableEntity, "invalid_menu_items", err.Error(), validationErrors)
 			return
@@ -589,14 +574,14 @@ func (s *Server) menuCategoriesHandler(c *gin.Context) {
 }
 
 func (s *Server) createMenuCategoriesHandler(c *gin.Context) {
-	var request []menu.NewCategory
+	var request []models.NewCategory
 	if err := c.ShouldBindJSON(&request); err != nil {
 		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be a JSON array of categories", nil)
 		return
 	}
 	categories, err := menu.NormalizeAndValidateNewCategories(request)
 	if err != nil {
-		var validationErrors menu.ValidationErrors
+		var validationErrors models.ValidationErrors
 		if errors.As(err, &validationErrors) {
 			writeError(c, http.StatusUnprocessableEntity, "invalid_categories", err.Error(), validationErrors)
 			return

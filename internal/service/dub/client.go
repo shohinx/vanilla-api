@@ -11,19 +11,13 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/shohinx/vanilla-api/internal/sdk/models"
 )
 
-type Link struct {
-	ID          string    `json:"id"`
-	ShortLink   string    `json:"short_link"`
-	QRCode      string    `json:"qr_code"`
-	Destination string    `json:"destination"`
-	CreatedAt   time.Time `json:"created_at"`
-}
-
 type Service interface {
-	CreateMenuLink(context.Context, string, string, string) (Link, error)
-	RetrieveMenuLink(context.Context, string) (Link, error)
+	CreateMenuLink(context.Context, string, string, string) (models.Link, error)
+	RetrieveMenuLink(context.Context, string) (models.Link, error)
 	QRCode(context.Context, string) ([]byte, error)
 }
 
@@ -43,7 +37,7 @@ func New(token string) *Client {
 	}
 }
 
-func (c *Client) CreateMenuLink(ctx context.Context, destination, domain, key string) (Link, error) {
+func (c *Client) CreateMenuLink(ctx context.Context, destination, domain, key string) (models.Link, error) {
 	payload := map[string]any{
 		"url":        destination,
 		"externalId": "vanilla-api-menu",
@@ -57,37 +51,37 @@ func (c *Client) CreateMenuLink(ctx context.Context, destination, domain, key st
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return Link{}, fmt.Errorf("encode Dub request: %w", err)
+		return models.Link{}, fmt.Errorf("encode Dub request: %w", err)
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/links", bytes.NewReader(body))
 	if err != nil {
-		return Link{}, fmt.Errorf("create Dub request: %w", err)
+		return models.Link{}, fmt.Errorf("create Dub request: %w", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
 	request.Header.Set("Content-Type", "application/json")
 
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return Link{}, fmt.Errorf("call Dub: %w", err)
+		return models.Link{}, fmt.Errorf("call Dub: %w", err)
 	}
 	defer response.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
-		return Link{}, fmt.Errorf("read Dub response: %w", err)
+		return models.Link{}, fmt.Errorf("read Dub response: %w", err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Link{}, fmt.Errorf("Dub returned status %d: %s", response.StatusCode, strings.TrimSpace(string(responseBody)))
+		return models.Link{}, fmt.Errorf("Dub returned status %d: %s", response.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
 
 	link, err := decodeLink(responseBody)
 	if err != nil {
-		return Link{}, err
+		return models.Link{}, err
 	}
 	return link, nil
 }
 
-func (c *Client) RetrieveMenuLink(ctx context.Context, linkID string) (Link, error) {
+func (c *Client) RetrieveMenuLink(ctx context.Context, linkID string) (models.Link, error) {
 	endpoint, _ := url.Parse(c.baseURL + "/links/info")
 	query := endpoint.Query()
 	if linkID != "" {
@@ -98,28 +92,28 @@ func (c *Client) RetrieveMenuLink(ctx context.Context, linkID string) (Link, err
 	endpoint.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
-		return Link{}, fmt.Errorf("create Dub retrieve request: %w", err)
+		return models.Link{}, fmt.Errorf("create Dub retrieve request: %w", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return Link{}, fmt.Errorf("retrieve Dub link: %w", err)
+		return models.Link{}, fmt.Errorf("retrieve Dub link: %w", err)
 	}
 	defer response.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
-		return Link{}, fmt.Errorf("read Dub response: %w", err)
+		return models.Link{}, fmt.Errorf("read Dub response: %w", err)
 	}
 	if response.StatusCode == http.StatusNotFound {
-		return Link{}, ErrNotFound
+		return models.Link{}, ErrNotFound
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return Link{}, fmt.Errorf("Dub returned status %d: %s", response.StatusCode, strings.TrimSpace(string(responseBody)))
+		return models.Link{}, fmt.Errorf("Dub returned status %d: %s", response.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
 	return decodeLink(responseBody)
 }
 
-func decodeLink(responseBody []byte) (Link, error) {
+func decodeLink(responseBody []byte) (models.Link, error) {
 	var result struct {
 		ID        string `json:"id"`
 		ShortLink string `json:"shortLink"`
@@ -128,10 +122,10 @@ func decodeLink(responseBody []byte) (Link, error) {
 		CreatedAt string `json:"createdAt"`
 	}
 	if err := json.Unmarshal(responseBody, &result); err != nil {
-		return Link{}, fmt.Errorf("decode Dub response: %w", err)
+		return models.Link{}, fmt.Errorf("decode Dub response: %w", err)
 	}
 	createdAt, _ := time.Parse(time.RFC3339, result.CreatedAt)
-	return Link{ID: result.ID, ShortLink: result.ShortLink, QRCode: result.QRCode, Destination: result.URL, CreatedAt: createdAt}, nil
+	return models.Link{ID: result.ID, ShortLink: result.ShortLink, QRCode: result.QRCode, Destination: result.URL, CreatedAt: createdAt}, nil
 }
 
 func (c *Client) QRCode(ctx context.Context, qrCodeURL string) ([]byte, error) {

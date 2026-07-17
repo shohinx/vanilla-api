@@ -1,4 +1,4 @@
-package imagestore
+package seaweedfs
 
 import (
 	"context"

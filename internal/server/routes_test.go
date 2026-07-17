@@ -16,31 +16,31 @@ import (
 	"time"
 
 	"github.com/shohinx/vanilla-api/internal/database"
-	"github.com/shohinx/vanilla-api/internal/dub"
-	"github.com/shohinx/vanilla-api/internal/imagestore"
-	"github.com/shohinx/vanilla-api/internal/menu"
+	"github.com/shohinx/vanilla-api/internal/sdk/models"
+	"github.com/shohinx/vanilla-api/internal/service/dub"
+	"github.com/shohinx/vanilla-api/internal/service/seaweedfs"
 )
 
 type fakeDatabase struct {
-	menu               menu.Menu
+	menu               models.Menu
 	includeUnavailable bool
-	inventory          menu.Inventory
+	inventory          models.Inventory
 	updateItemID       string
 	updateQuantity     int
-	updatedImage       menu.ItemImage
+	updatedImage       models.ItemImage
 	updateImageItemID  string
 	updateImageURL     string
 	updateImageErr     error
-	createdOrder       menu.Order
-	orders             []menu.Order
-	updatedOrder       menu.Order
+	createdOrder       models.Order
+	orders             []models.Order
+	updatedOrder       models.Order
 	updatedOrderID     string
 	updatedStatus      string
-	qrLink             dub.Link
-	createdRequest     menu.SubmitOrderRequest
-	createdMenuItems   []menu.NewItem
-	categories         []menu.MenuCategory
-	createdCategories  []menu.NewCategory
+	qrLink             models.Link
+	createdRequest     models.SubmitOrderRequest
+	createdMenuItems   []models.NewItem
+	categories         []models.MenuCategory
+	createdCategories  []models.NewCategory
 }
 
 func (f *fakeDatabase) Initialize(context.Context) error { return nil }
@@ -48,53 +48,59 @@ func (f *fakeDatabase) Close() error                     { return nil }
 func (f *fakeDatabase) Health(context.Context) map[string]string {
 	return map[string]string{"status": "up"}
 }
-func (f *fakeDatabase) Menu(_ context.Context, includeUnavailable bool) (menu.Menu, error) {
+func (f *fakeDatabase) Menu(_ context.Context, includeUnavailable bool) (models.Menu, error) {
 	f.includeUnavailable = includeUnavailable
 	return f.menu, nil
 }
 
-func (f *fakeDatabase) Categories(context.Context) ([]menu.MenuCategory, error) {
+func (f *fakeDatabase) Categories(context.Context) ([]models.MenuCategory, error) {
 	return f.categories, nil
 }
 
-func (f *fakeDatabase) CreateCategories(_ context.Context, categories []menu.NewCategory) ([]menu.MenuCategory, error) {
+func (f *fakeDatabase) CreateCategories(_ context.Context, categories []models.NewCategory) ([]models.MenuCategory, error) {
 	f.createdCategories = categories
-	created := make([]menu.MenuCategory, 0, len(categories))
+	created := make([]models.MenuCategory, 0, len(categories))
 	for _, category := range categories {
-		created = append(created, menu.MenuCategory{
+		created = append(created, models.MenuCategory{
 			ID: category.ID, Name: category.Name,
 			Description: category.Description, SortOrder: category.SortOrder,
 		})
 	}
 	return created, nil
 }
-func (f *fakeDatabase) UpdateInventory(_ context.Context, itemID string, quantity int) (menu.Inventory, error) {
+func (f *fakeDatabase) UpdateInventory(_ context.Context, itemID string, quantity int) (models.Inventory, error) {
 	f.updateItemID = itemID
 	f.updateQuantity = quantity
 	return f.inventory, nil
 }
 
-func (f *fakeDatabase) UpdateItemImage(_ context.Context, itemID, imageURL string) (menu.ItemImage, error) {
+func (f *fakeDatabase) UpdateItemImage(_ context.Context, itemID, imageURL string) (models.ItemImage, error) {
 	f.updateImageItemID = itemID
 	f.updateImageURL = imageURL
 	if f.updateImageErr != nil {
-		return menu.ItemImage{}, f.updateImageErr
+		return models.ItemImage{}, f.updateImageErr
 	}
 	f.updatedImage.ItemID = itemID
 	f.updatedImage.ImageURL = imageURL
 	return f.updatedImage, nil
 }
 
-func (f *fakeDatabase) CreateMenuItems(_ context.Context, items []menu.NewItem) ([]menu.Item, error) {
+func (f *fakeDatabase) CreateMenuItems(_ context.Context, items []models.NewItem) ([]models.Item, error) {
 	f.createdMenuItems = items
-	created := make([]menu.Item, 0, len(items))
+	created := make([]models.Item, 0, len(items))
 	for _, item := range items {
-		created = append(created, menu.Item{ID: item.ID, Name: item.Name, Currency: item.Currency})
+		imageURL := ""
+		if item.ImageURL != nil {
+			imageURL = *item.ImageURL
+		}
+		created = append(created, models.Item{
+			ID: item.ID, Name: item.Name, ImageURL: imageURL, Currency: item.Currency,
+		})
 	}
 	return created, nil
 }
 
-func (f *fakeDatabase) CreateOrder(_ context.Context, request menu.SubmitOrderRequest, quote menu.Quote) (menu.Order, error) {
+func (f *fakeDatabase) CreateOrder(_ context.Context, request models.SubmitOrderRequest, quote models.Quote) (models.Order, error) {
 	f.createdRequest = request
 	f.createdOrder.Items = quote.Items
 	f.createdOrder.SubtotalCents = quote.SubtotalCents
@@ -102,30 +108,30 @@ func (f *fakeDatabase) CreateOrder(_ context.Context, request menu.SubmitOrderRe
 	return f.createdOrder, nil
 }
 
-func (f *fakeDatabase) Orders(context.Context, string) ([]menu.Order, error) {
+func (f *fakeDatabase) Orders(context.Context, string) ([]models.Order, error) {
 	return f.orders, nil
 }
 
-func (f *fakeDatabase) UpdateOrderStatus(_ context.Context, orderID, status string) (menu.Order, error) {
+func (f *fakeDatabase) UpdateOrderStatus(_ context.Context, orderID, status string) (models.Order, error) {
 	f.updatedOrderID = orderID
 	f.updatedStatus = status
 	return f.updatedOrder, nil
 }
 
-func (f *fakeDatabase) MenuQR(context.Context) (dub.Link, error) {
+func (f *fakeDatabase) MenuQR(context.Context) (models.Link, error) {
 	if f.qrLink.ID == "" {
-		return dub.Link{}, database.ErrNotFound
+		return models.Link{}, database.ErrNotFound
 	}
 	return f.qrLink, nil
 }
 
-func (f *fakeDatabase) SaveMenuQR(_ context.Context, link dub.Link) error {
+func (f *fakeDatabase) SaveMenuQR(_ context.Context, link models.Link) error {
 	f.qrLink = link
 	return nil
 }
 
 type fakeDub struct {
-	link        dub.Link
+	link        models.Link
 	image       []byte
 	retrieveErr error
 }
@@ -137,7 +143,7 @@ type fakeImageStore struct {
 	putContentType string
 	putErr         error
 	getKey         string
-	getObject      imagestore.Object
+	getObject      seaweedfs.Object
 	getErr         error
 }
 
@@ -152,21 +158,21 @@ func (f *fakeImageStore) Put(_ context.Context, key string, body io.Reader, size
 	return nil
 }
 
-func (f *fakeImageStore) Get(_ context.Context, key string) (imagestore.Object, error) {
+func (f *fakeImageStore) Get(_ context.Context, key string) (seaweedfs.Object, error) {
 	f.getKey = key
 	return f.getObject, f.getErr
 }
 
-func (f *fakeDub) CreateMenuLink(context.Context, string, string, string) (dub.Link, error) {
+func (f *fakeDub) CreateMenuLink(context.Context, string, string, string) (models.Link, error) {
 	return f.link, nil
 }
 
-func (f *fakeDub) RetrieveMenuLink(context.Context, string) (dub.Link, error) {
+func (f *fakeDub) RetrieveMenuLink(context.Context, string) (models.Link, error) {
 	if f.retrieveErr != nil {
-		return dub.Link{}, f.retrieveErr
+		return models.Link{}, f.retrieveErr
 	}
 	if f.link.ID == "" {
-		return dub.Link{}, dub.ErrNotFound
+		return models.Link{}, dub.ErrNotFound
 	}
 	return f.link, nil
 }
@@ -175,16 +181,16 @@ func (f *fakeDub) QRCode(context.Context, string) ([]byte, error) {
 	return f.image, nil
 }
 
-func testMenu() menu.Menu {
-	return menu.Menu{
+func testMenu() models.Menu {
+	return models.Menu{
 		GeneratedAt: time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC),
-		Categories: []menu.Category{{
-			ID: "drinks", Name: "Drinks", Items: []menu.Item{{
+		Categories: []models.Category{{
+			ID: "drinks", Name: "Drinks", Items: []models.Item{{
 				ID: "latte", Name: "Latte", Type: "drink", PriceCents: 550,
 				Currency: "USD", Available: true, QuantityAvailable: 4,
-				ModifierGroups: []menu.ModifierGroup{{
+				ModifierGroups: []models.ModifierGroup{{
 					ID: "latte-size", Name: "Size", MinSelections: 1, MaxSelections: 1,
-					Options: []menu.ModifierOption{
+					Options: []models.ModifierOption{
 						{ID: "latte-8oz", Name: "8 oz", Available: true},
 						{ID: "latte-12oz", Name: "12 oz", PriceDeltaCents: 75, Available: true},
 					},
@@ -197,7 +203,7 @@ func testMenu() menu.Menu {
 func newTestRouter(db *fakeDatabase) http.Handler {
 	return New(db, &fakeDub{}, nil, Config{
 		AdminAPIKey:    "test-secret",
-		MenuAppURL:     "https://menu.example.com",
+		MenuAppURL:     "https://models.example.com",
 		AllowedOrigins: []string{"http://localhost:5173"},
 	}).RegisterRoutes()
 }
@@ -205,17 +211,17 @@ func newTestRouter(db *fakeDatabase) http.Handler {
 func newTestRouterWithDub(db *fakeDatabase, dubService *fakeDub) http.Handler {
 	return New(db, dubService, nil, Config{
 		AdminAPIKey:    "test-secret",
-		MenuAppURL:     "https://menu.example.com",
+		MenuAppURL:     "https://models.example.com",
 		AllowedOrigins: []string{"http://localhost:5173"},
 		DubAPIKey:      "dub_test",
 		DubLinkKey:     "menu",
 	}).RegisterRoutes()
 }
 
-func newTestRouterWithImages(db *fakeDatabase, imageService imagestore.Service) http.Handler {
+func newTestRouterWithImages(db *fakeDatabase, imageService seaweedfs.Service) http.Handler {
 	return New(db, &fakeDub{}, imageService, Config{
 		AdminAPIKey:    "test-secret",
-		MenuAppURL:     "https://menu.example.com",
+		MenuAppURL:     "https://models.example.com",
 		AllowedOrigins: []string{"http://localhost:5173"},
 		PublicBaseURL:  "https://api.example.com",
 	}).RegisterRoutes()
@@ -361,7 +367,7 @@ func TestAdminImageUploadRejectsNonImage(t *testing.T) {
 
 func TestPublicImageIsProxiedFromObjectStorage(t *testing.T) {
 	key := "menu/0123456789abcdef0123456789abcdef.jpg"
-	imageService := &fakeImageStore{getObject: imagestore.Object{
+	imageService := &fakeImageStore{getObject: seaweedfs.Object{
 		Body:          io.NopCloser(strings.NewReader("jpeg-data")),
 		ContentType:   "image/jpeg",
 		ContentLength: int64(len("jpeg-data")),
@@ -398,7 +404,7 @@ func TestQuoteHandlerPricesCustomizations(t *testing.T) {
 	if !db.includeUnavailable {
 		t.Fatal("quote should load unavailable items so it can validate stock")
 	}
-	var quote menu.Quote
+	var quote models.Quote
 	if err := json.Unmarshal(response.Body.Bytes(), &quote); err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +430,7 @@ func TestQuoteHandlerRejectsMissingRequiredCustomization(t *testing.T) {
 func TestSubmitOrderStoresOrderWithoutUpdatingInventory(t *testing.T) {
 	db := &fakeDatabase{
 		menu:         testMenu(),
-		createdOrder: menu.Order{ID: "order-1", OrderNumber: "VL-123456", Status: "submitted"},
+		createdOrder: models.Order{ID: "order-1", OrderNumber: "VL-123456", Status: "submitted"},
 	}
 	body := bytes.NewBufferString(`{
 		"customer_name":"Maya",
@@ -449,7 +455,7 @@ func TestSubmitOrderStoresOrderWithoutUpdatingInventory(t *testing.T) {
 }
 
 func TestAdminCanListSubmittedOrders(t *testing.T) {
-	db := &fakeDatabase{orders: []menu.Order{{ID: "order-1", Status: "submitted"}}}
+	db := &fakeDatabase{orders: []models.Order{{ID: "order-1", Status: "submitted"}}}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/orders?status=submitted", nil)
 	request.Header.Set("X-Admin-Key", "test-secret")
 	response := httptest.NewRecorder()
@@ -462,7 +468,7 @@ func TestAdminCanListSubmittedOrders(t *testing.T) {
 }
 
 func TestAdminMarksPaidOrderSold(t *testing.T) {
-	db := &fakeDatabase{updatedOrder: menu.Order{ID: "order-1", Status: "sold"}}
+	db := &fakeDatabase{updatedOrder: models.Order{ID: "order-1", Status: "sold"}}
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/orders/order-1/status", bytes.NewBufferString(`{"status":"sold"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Admin-Key", "test-secret")
@@ -492,7 +498,7 @@ func TestUpdateInventoryRequiresAdminKey(t *testing.T) {
 }
 
 func TestUpdateInventory(t *testing.T) {
-	db := &fakeDatabase{inventory: menu.Inventory{ItemID: "latte", Quantity: 0, Available: false}}
+	db := &fakeDatabase{inventory: models.Inventory{ItemID: "latte", Quantity: 0, Available: false}}
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/latte/inventory", bytes.NewBufferString(`{"quantity":0}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Admin-Key", "test-secret")
@@ -523,7 +529,7 @@ func TestUpdateItemImage(t *testing.T) {
 	if db.updateImageItemID != "carrot-cake" || db.updateImageURL != "https://api.example.com/api/v1/images/menu/new.jpg" {
 		t.Fatalf("unexpected image update: item=%q image_url=%q", db.updateImageItemID, db.updateImageURL)
 	}
-	var result menu.ItemImage
+	var result models.ItemImage
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
@@ -645,12 +651,39 @@ func TestCreateMenuItemsAcceptsOneOrManyItems(t *testing.T) {
 			if db.createdMenuItems[0].Currency != "USD" {
 				t.Fatalf("expected normalized currency, got %q", db.createdMenuItems[0].Currency)
 			}
+			if db.createdMenuItems[0].ImageURL != nil {
+				t.Fatalf("expected image_url to be optional, got %q", *db.createdMenuItems[0].ImageURL)
+			}
 		})
 	}
 }
 
+func TestCreateMenuItemsAcceptsAnOptionalImageURL(t *testing.T) {
+	db := &fakeDatabase{}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/admin/menu/items",
+		bytes.NewBufferString(`[{"id":"cookie","category_id":"sweets","name":"Cookie","type":"sweet","image_url":" /api/v1/images/menu/cookie.webp ","price_cents":350,"currency":"USD","quantity":4}]`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Admin-Key", "test-secret")
+	response := httptest.NewRecorder()
+
+	newTestRouter(db).ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d: %s", response.Code, response.Body.String())
+	}
+	if len(db.createdMenuItems) != 1 || db.createdMenuItems[0].ImageURL == nil {
+		t.Fatal("expected the supplied image URL to be retained")
+	}
+	if *db.createdMenuItems[0].ImageURL != "/api/v1/images/menu/cookie.webp" {
+		t.Fatalf("unexpected image URL %q", *db.createdMenuItems[0].ImageURL)
+	}
+}
+
 func TestAdminCategoryDropdownReturnsAllCategories(t *testing.T) {
-	db := &fakeDatabase{categories: []menu.MenuCategory{
+	db := &fakeDatabase{categories: []models.MenuCategory{
 		{ID: "drinks", Name: "Beverages", SortOrder: 10},
 		{ID: "cakes", Name: "Cakes", SortOrder: 20},
 	}}
@@ -664,7 +697,7 @@ func TestAdminCategoryDropdownReturnsAllCategories(t *testing.T) {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
 	var result struct {
-		Categories []menu.MenuCategory `json:"categories"`
+		Categories []models.MenuCategory `json:"categories"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
@@ -704,17 +737,17 @@ func TestMenuAppRedirect(t *testing.T) {
 	if response.Code != http.StatusTemporaryRedirect {
 		t.Fatalf("expected status 307, got %d", response.Code)
 	}
-	if response.Header().Get("Location") != "https://menu.example.com" {
+	if response.Header().Get("Location") != "https://models.example.com" {
 		t.Fatalf("unexpected redirect: %q", response.Header().Get("Location"))
 	}
 }
 
 func TestAdminProvisionsSingleMenuQR(t *testing.T) {
 	db := &fakeDatabase{}
-	dubService := &fakeDub{retrieveErr: dub.ErrNotFound, link: dub.Link{
+	dubService := &fakeDub{retrieveErr: dub.ErrNotFound, link: models.Link{
 		ID: "dub-link-1", ShortLink: "https://dub.sh/menu",
 		QRCode:      "https://api.dub.co/qr?url=https://dub.sh/menu",
-		Destination: "https://menu.example.com",
+		Destination: "https://models.example.com",
 	}}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/menu/qr", nil)
 	request.Header.Set("X-Admin-Key", "test-secret")
@@ -731,7 +764,7 @@ func TestAdminProvisionsSingleMenuQR(t *testing.T) {
 }
 
 func TestMenuQRImageIsProxiedThroughBackend(t *testing.T) {
-	db := &fakeDatabase{qrLink: dub.Link{
+	db := &fakeDatabase{qrLink: models.Link{
 		ID: "dub-link-1", QRCode: "https://api.dub.co/qr?url=https://dub.sh/menu",
 	}}
 	dubService := &fakeDub{image: []byte("png-data")}

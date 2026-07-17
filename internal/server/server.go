@@ -12,8 +12,8 @@ import (
 	_ "github.com/joho/godotenv/autoload"
 
 	"github.com/shohinx/vanilla-api/internal/database"
-	"github.com/shohinx/vanilla-api/internal/dub"
-	"github.com/shohinx/vanilla-api/internal/imagestore"
+	"github.com/shohinx/vanilla-api/internal/service/dub"
+	"github.com/shohinx/vanilla-api/internal/service/seaweedfs"
 )
 
 type Config struct {
@@ -29,11 +29,11 @@ type Config struct {
 type Server struct {
 	db     database.Service
 	dub    dub.Service
-	images imagestore.Service
+	images seaweedfs.Service
 	config Config
 }
 
-func New(db database.Service, dubService dub.Service, imageService imagestore.Service, config Config) *Server {
+func New(db database.Service, dubService dub.Service, imageService seaweedfs.Service, config Config) *Server {
 	return &Server{db: db, dub: dubService, images: imageService, config: config}
 }
 
@@ -58,7 +58,7 @@ func NewServer() (*http.Server, error) {
 		DubLinkKey:     envOrDefault("DUB_LINK_KEY", "menu"),
 		PublicBaseURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
 	}
-	imageService, err := imagestore.New(context.Background(), imagestore.Config{
+	imageService, err := seaweedfs.New(context.Background(), seaweedfs.Config{
 		Endpoint:  os.Getenv("IMAGE_S3_ENDPOINT"),
 		Region:    envOrDefault("IMAGE_S3_REGION", "us-east-1"),
 		AccessKey: os.Getenv("IMAGE_S3_ACCESS_KEY"),

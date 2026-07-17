@@ -17,24 +17,23 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/joho/godotenv/autoload"
 
-	"github.com/shohinx/vanilla-api/internal/dub"
-	"github.com/shohinx/vanilla-api/internal/menu"
+	"github.com/shohinx/vanilla-api/internal/sdk/models"
 )
 
 type Service interface {
 	Initialize(context.Context) error
 	Health(context.Context) map[string]string
-	Menu(context.Context, bool) (menu.Menu, error)
-	Categories(context.Context) ([]menu.MenuCategory, error)
-	CreateCategories(context.Context, []menu.NewCategory) ([]menu.MenuCategory, error)
-	UpdateInventory(context.Context, string, int) (menu.Inventory, error)
-	UpdateItemImage(context.Context, string, string) (menu.ItemImage, error)
-	CreateMenuItems(context.Context, []menu.NewItem) ([]menu.Item, error)
-	CreateOrder(context.Context, menu.SubmitOrderRequest, menu.Quote) (menu.Order, error)
-	Orders(context.Context, string) ([]menu.Order, error)
-	UpdateOrderStatus(context.Context, string, string) (menu.Order, error)
-	MenuQR(context.Context) (dub.Link, error)
-	SaveMenuQR(context.Context, dub.Link) error
+	Menu(context.Context, bool) (models.Menu, error)
+	Categories(context.Context) ([]models.MenuCategory, error)
+	CreateCategories(context.Context, []models.NewCategory) ([]models.MenuCategory, error)
+	UpdateInventory(context.Context, string, int) (models.Inventory, error)
+	UpdateItemImage(context.Context, string, string) (models.ItemImage, error)
+	CreateMenuItems(context.Context, []models.NewItem) ([]models.Item, error)
+	CreateOrder(context.Context, models.SubmitOrderRequest, models.Quote) (models.Order, error)
+	Orders(context.Context, string) ([]models.Order, error)
+	UpdateOrderStatus(context.Context, string, string) (models.Order, error)
+	MenuQR(context.Context) (models.Link, error)
+	SaveMenuQR(context.Context, models.Link) error
 	Close() error
 }
 
@@ -125,7 +124,7 @@ func (s *service) Health(parent context.Context) map[string]string {
 	return stats
 }
 
-func (s *service) Menu(ctx context.Context, includeUnavailable bool) (menu.Menu, error) {
+func (s *service) Menu(ctx context.Context, includeUnavailable bool) (models.Menu, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT c.id, c.name, c.description,
 		       i.id, i.name, i.description, i.item_type, i.image_url,
@@ -135,44 +134,44 @@ func (s *service) Menu(ctx context.Context, includeUnavailable bool) (menu.Menu,
 		WHERE i.is_active = TRUE AND ($1 OR i.quantity_available > 0)
 		ORDER BY c.sort_order, c.name, i.sort_order, i.name`, includeUnavailable)
 	if err != nil {
-		return menu.Menu{}, fmt.Errorf("query menu items: %w", err)
+		return models.Menu{}, fmt.Errorf("query menu items: %w", err)
 	}
 	defer rows.Close()
 
 	type categoryData struct {
-		category menu.Category
+		category models.Category
 		itemIDs  []string
 	}
 	categories := make([]categoryData, 0)
 	categoryIndexes := make(map[string]int)
-	items := make(map[string]*menu.Item)
+	items := make(map[string]*models.Item)
 
 	for rows.Next() {
 		var categoryID, categoryName, categoryDescription string
-		item := &menu.Item{}
+		item := &models.Item{}
 		if err := rows.Scan(
 			&categoryID, &categoryName, &categoryDescription,
 			&item.ID, &item.Name, &item.Description, &item.Type, &item.ImageURL,
 			&item.PriceCents, &item.Currency, &item.QuantityAvailable,
 		); err != nil {
-			return menu.Menu{}, fmt.Errorf("scan menu item: %w", err)
+			return models.Menu{}, fmt.Errorf("scan menu item: %w", err)
 		}
 		item.Available = item.QuantityAvailable > 0
-		item.ModifierGroups = []menu.ModifierGroup{}
+		item.ModifierGroups = []models.ModifierGroup{}
 		items[item.ID] = item
 
 		categoryIndex, found := categoryIndexes[categoryID]
 		if !found {
 			categoryIndex = len(categories)
 			categoryIndexes[categoryID] = categoryIndex
-			categories = append(categories, categoryData{category: menu.Category{
-				ID: categoryID, Name: categoryName, Description: categoryDescription, Items: []menu.Item{},
+			categories = append(categories, categoryData{category: models.Category{
+				ID: categoryID, Name: categoryName, Description: categoryDescription, Items: []models.Item{},
 			}})
 		}
 		categories[categoryIndex].itemIDs = append(categories[categoryIndex].itemIDs, item.ID)
 	}
 	if err := rows.Err(); err != nil {
-		return menu.Menu{}, fmt.Errorf("iterate menu items: %w", err)
+		return models.Menu{}, fmt.Errorf("iterate menu items: %w", err)
 	}
 
 	modifierRows, err := s.db.QueryContext(ctx, `
@@ -184,7 +183,7 @@ func (s *service) Menu(ctx context.Context, includeUnavailable bool) (menu.Menu,
 		WHERE i.is_active = TRUE
 		ORDER BY mg.sort_order, mg.name, mo.sort_order, mo.name`)
 	if err != nil {
-		return menu.Menu{}, fmt.Errorf("query modifiers: %w", err)
+		return models.Menu{}, fmt.Errorf("query modifiers: %w", err)
 	}
 	defer modifierRows.Close()
 
@@ -192,12 +191,12 @@ func (s *service) Menu(ctx context.Context, includeUnavailable bool) (menu.Menu,
 	for modifierRows.Next() {
 		var groupID, itemID, groupName string
 		var minSelections, maxSelections int
-		var option menu.ModifierOption
+		var option models.ModifierOption
 		if err := modifierRows.Scan(
 			&groupID, &itemID, &groupName, &minSelections, &maxSelections,
 			&option.ID, &option.Name, &option.PriceDeltaCents, &option.Available,
 		); err != nil {
-			return menu.Menu{}, fmt.Errorf("scan modifier: %w", err)
+			return models.Menu{}, fmt.Errorf("scan modifier: %w", err)
 		}
 		item, found := items[itemID]
 		if !found {
@@ -207,18 +206,18 @@ func (s *service) Menu(ctx context.Context, includeUnavailable bool) (menu.Menu,
 		if !found {
 			groupIndex = len(item.ModifierGroups)
 			groupIndexes[groupID] = groupIndex
-			item.ModifierGroups = append(item.ModifierGroups, menu.ModifierGroup{
+			item.ModifierGroups = append(item.ModifierGroups, models.ModifierGroup{
 				ID: groupID, Name: groupName, MinSelections: minSelections,
-				MaxSelections: maxSelections, Options: []menu.ModifierOption{},
+				MaxSelections: maxSelections, Options: []models.ModifierOption{},
 			})
 		}
 		item.ModifierGroups[groupIndex].Options = append(item.ModifierGroups[groupIndex].Options, option)
 	}
 	if err := modifierRows.Err(); err != nil {
-		return menu.Menu{}, fmt.Errorf("iterate modifiers: %w", err)
+		return models.Menu{}, fmt.Errorf("iterate modifiers: %w", err)
 	}
 
-	result := menu.Menu{GeneratedAt: time.Now().UTC(), Categories: make([]menu.Category, 0, len(categories))}
+	result := models.Menu{GeneratedAt: time.Now().UTC(), Categories: make([]models.Category, 0, len(categories))}
 	for _, data := range categories {
 		for _, itemID := range data.itemIDs {
 			data.category.Items = append(data.category.Items, *items[itemID])
@@ -228,7 +227,7 @@ func (s *service) Menu(ctx context.Context, includeUnavailable bool) (menu.Menu,
 	return result, nil
 }
 
-func (s *service) Categories(ctx context.Context) ([]menu.MenuCategory, error) {
+func (s *service) Categories(ctx context.Context) ([]models.MenuCategory, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, description, sort_order
 		FROM categories
@@ -237,9 +236,9 @@ func (s *service) Categories(ctx context.Context) ([]menu.MenuCategory, error) {
 		return nil, fmt.Errorf("query categories: %w", err)
 	}
 	defer rows.Close()
-	categories := make([]menu.MenuCategory, 0)
+	categories := make([]models.MenuCategory, 0)
 	for rows.Next() {
-		var category menu.MenuCategory
+		var category models.MenuCategory
 		if err := rows.Scan(&category.ID, &category.Name, &category.Description, &category.SortOrder); err != nil {
 			return nil, fmt.Errorf("scan category: %w", err)
 		}
@@ -251,13 +250,13 @@ func (s *service) Categories(ctx context.Context) ([]menu.MenuCategory, error) {
 	return categories, nil
 }
 
-func (s *service) CreateCategories(ctx context.Context, newCategories []menu.NewCategory) ([]menu.MenuCategory, error) {
+func (s *service) CreateCategories(ctx context.Context, newCategories []models.NewCategory) ([]models.MenuCategory, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin category transaction: %w", err)
 	}
 	defer tx.Rollback()
-	created := make([]menu.MenuCategory, 0, len(newCategories))
+	created := make([]models.MenuCategory, 0, len(newCategories))
 	for _, newCategory := range newCategories {
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO categories (id, name, description, sort_order)
@@ -267,7 +266,7 @@ func (s *service) CreateCategories(ctx context.Context, newCategories []menu.New
 		if err != nil {
 			return nil, menuItemWriteError(err)
 		}
-		created = append(created, menu.MenuCategory{
+		created = append(created, models.MenuCategory{
 			ID: newCategory.ID, Name: newCategory.Name,
 			Description: newCategory.Description, SortOrder: newCategory.SortOrder,
 		})
@@ -278,8 +277,8 @@ func (s *service) CreateCategories(ctx context.Context, newCategories []menu.New
 	return created, nil
 }
 
-func (s *service) UpdateInventory(ctx context.Context, itemID string, quantity int) (menu.Inventory, error) {
-	var inventory menu.Inventory
+func (s *service) UpdateInventory(ctx context.Context, itemID string, quantity int) (models.Inventory, error) {
+	var inventory models.Inventory
 	err := s.db.QueryRowContext(ctx, `
 		UPDATE menu_items
 		SET quantity_available = $2, updated_at = NOW()
@@ -289,16 +288,16 @@ func (s *service) UpdateInventory(ctx context.Context, itemID string, quantity i
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return menu.Inventory{}, ErrNotFound
+			return models.Inventory{}, ErrNotFound
 		}
-		return menu.Inventory{}, fmt.Errorf("update inventory: %w", err)
+		return models.Inventory{}, fmt.Errorf("update inventory: %w", err)
 	}
 	inventory.Available = inventory.Quantity > 0
 	return inventory, nil
 }
 
-func (s *service) UpdateItemImage(ctx context.Context, itemID, imageURL string) (menu.ItemImage, error) {
-	var image menu.ItemImage
+func (s *service) UpdateItemImage(ctx context.Context, itemID, imageURL string) (models.ItemImage, error) {
+	var image models.ItemImage
 	err := s.db.QueryRowContext(ctx, `
 		UPDATE menu_items
 		SET image_url = $2, updated_at = NOW()
@@ -308,40 +307,44 @@ func (s *service) UpdateItemImage(ctx context.Context, itemID, imageURL string) 
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return menu.ItemImage{}, ErrNotFound
+			return models.ItemImage{}, ErrNotFound
 		}
-		return menu.ItemImage{}, fmt.Errorf("update item image: %w", err)
+		return models.ItemImage{}, fmt.Errorf("update item image: %w", err)
 	}
 	return image, nil
 }
 
-func (s *service) CreateMenuItems(ctx context.Context, newItems []menu.NewItem) ([]menu.Item, error) {
+func (s *service) CreateMenuItems(ctx context.Context, newItems []models.NewItem) ([]models.Item, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin menu item transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	created := make([]menu.Item, 0, len(newItems))
+	created := make([]models.Item, 0, len(newItems))
 	for _, newItem := range newItems {
+		imageURL := ""
+		if newItem.ImageURL != nil {
+			imageURL = *newItem.ImageURL
+		}
 		_, err := tx.ExecContext(ctx, `
 			INSERT INTO menu_items
 			    (id, category_id, name, description, item_type, image_url,
 			     price_cents, currency, quantity_available, sort_order)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 			newItem.ID, newItem.CategoryID, newItem.Name, newItem.Description,
-			newItem.Type, newItem.ImageURL, newItem.PriceCents, newItem.Currency,
+			newItem.Type, imageURL, newItem.PriceCents, newItem.Currency,
 			newItem.Quantity, newItem.SortOrder,
 		)
 		if err != nil {
 			return nil, menuItemWriteError(err)
 		}
 
-		item := menu.Item{
+		item := models.Item{
 			ID: newItem.ID, Name: newItem.Name, Description: newItem.Description,
-			Type: newItem.Type, ImageURL: newItem.ImageURL, PriceCents: newItem.PriceCents,
+			Type: newItem.Type, ImageURL: imageURL, PriceCents: newItem.PriceCents,
 			Currency: newItem.Currency, Available: newItem.Quantity > 0,
-			QuantityAvailable: newItem.Quantity, ModifierGroups: []menu.ModifierGroup{},
+			QuantityAvailable: newItem.Quantity, ModifierGroups: []models.ModifierGroup{},
 		}
 		for _, newGroup := range newItem.ModifierGroups {
 			_, err := tx.ExecContext(ctx, `
@@ -354,9 +357,9 @@ func (s *service) CreateMenuItems(ctx context.Context, newItems []menu.NewItem) 
 			if err != nil {
 				return nil, menuItemWriteError(err)
 			}
-			group := menu.ModifierGroup{
+			group := models.ModifierGroup{
 				ID: newGroup.ID, Name: newGroup.Name, MinSelections: newGroup.MinSelections,
-				MaxSelections: newGroup.MaxSelections, Options: []menu.ModifierOption{},
+				MaxSelections: newGroup.MaxSelections, Options: []models.ModifierOption{},
 			}
 			for _, newOption := range newGroup.Options {
 				available := true
@@ -373,7 +376,7 @@ func (s *service) CreateMenuItems(ctx context.Context, newItems []menu.NewItem) 
 				if err != nil {
 					return nil, menuItemWriteError(err)
 				}
-				group.Options = append(group.Options, menu.ModifierOption{
+				group.Options = append(group.Options, models.ModifierOption{
 					ID: newOption.ID, Name: newOption.Name,
 					PriceDeltaCents: newOption.PriceDeltaCents, Available: available,
 				})
@@ -401,22 +404,22 @@ func menuItemWriteError(err error) error {
 	return fmt.Errorf("create menu item: %w", err)
 }
 
-func (s *service) CreateOrder(ctx context.Context, request menu.SubmitOrderRequest, quote menu.Quote) (menu.Order, error) {
+func (s *service) CreateOrder(ctx context.Context, request models.SubmitOrderRequest, quote models.Quote) (models.Order, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return menu.Order{}, fmt.Errorf("begin order transaction: %w", err)
+		return models.Order{}, fmt.Errorf("begin order transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	orderID, err := randomHex(16)
 	if err != nil {
-		return menu.Order{}, err
+		return models.Order{}, err
 	}
 	orderCode, err := randomHex(3)
 	if err != nil {
-		return menu.Order{}, err
+		return models.Order{}, err
 	}
-	order := menu.Order{
+	order := models.Order{
 		ID: orderID, OrderNumber: "VL-" + strings.ToUpper(orderCode),
 		CustomerName: request.CustomerName, Notes: request.Notes, Status: "submitted",
 		Currency: quote.Currency, SubtotalCents: quote.SubtotalCents, Items: quote.Items,
@@ -429,7 +432,7 @@ func (s *service) CreateOrder(ctx context.Context, request menu.SubmitOrderReque
 		order.ID, order.OrderNumber, order.CustomerName, order.Notes,
 		order.Currency, order.SubtotalCents,
 	).Scan(&order.CreatedAt); err != nil {
-		return menu.Order{}, fmt.Errorf("insert order: %w", err)
+		return models.Order{}, fmt.Errorf("insert order: %w", err)
 	}
 
 	for _, item := range quote.Items {
@@ -442,7 +445,7 @@ func (s *service) CreateOrder(ctx context.Context, request menu.SubmitOrderReque
 			order.ID, item.ItemID, item.Name, item.Quantity,
 			item.UnitPriceCents, item.LineTotalCents,
 		).Scan(&lineID); err != nil {
-			return menu.Order{}, fmt.Errorf("insert order item: %w", err)
+			return models.Order{}, fmt.Errorf("insert order item: %w", err)
 		}
 		for _, option := range item.Options {
 			if _, err := tx.ExecContext(ctx, `
@@ -451,17 +454,17 @@ func (s *service) CreateOrder(ctx context.Context, request menu.SubmitOrderReque
 				VALUES ($1, $2, $3, $4)`,
 				lineID, option.ID, option.Name, option.PriceDeltaCents,
 			); err != nil {
-				return menu.Order{}, fmt.Errorf("insert order option: %w", err)
+				return models.Order{}, fmt.Errorf("insert order option: %w", err)
 			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return menu.Order{}, fmt.Errorf("commit order: %w", err)
+		return models.Order{}, fmt.Errorf("commit order: %w", err)
 	}
 	return order, nil
 }
 
-func (s *service) Orders(ctx context.Context, status string) ([]menu.Order, error) {
+func (s *service) Orders(ctx context.Context, status string) ([]models.Order, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, order_number, customer_name, notes, status, currency,
 		       subtotal_cents, created_at, sold_at
@@ -474,9 +477,9 @@ func (s *service) Orders(ctx context.Context, status string) ([]menu.Order, erro
 	}
 	defer rows.Close()
 
-	orders := make([]menu.Order, 0)
+	orders := make([]models.Order, 0)
 	for rows.Next() {
-		var order menu.Order
+		var order models.Order
 		var soldAt sql.NullTime
 		if err := rows.Scan(
 			&order.ID, &order.OrderNumber, &order.CustomerName, &order.Notes,
@@ -499,10 +502,10 @@ func (s *service) Orders(ctx context.Context, status string) ([]menu.Order, erro
 	return orders, nil
 }
 
-func (s *service) UpdateOrderStatus(ctx context.Context, orderID, status string) (menu.Order, error) {
+func (s *service) UpdateOrderStatus(ctx context.Context, orderID, status string) (models.Order, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return menu.Order{}, fmt.Errorf("begin status transaction: %w", err)
+		return models.Order{}, fmt.Errorf("begin status transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -511,18 +514,18 @@ func (s *service) UpdateOrderStatus(ctx context.Context, orderID, status string)
 		SELECT status FROM customer_orders WHERE id = $1 FOR UPDATE`, orderID,
 	).Scan(&currentStatus); err != nil {
 		if err == sql.ErrNoRows {
-			return menu.Order{}, ErrNotFound
+			return models.Order{}, ErrNotFound
 		}
-		return menu.Order{}, fmt.Errorf("lock order: %w", err)
+		return models.Order{}, fmt.Errorf("lock order: %w", err)
 	}
 	if currentStatus == status {
 		if err := tx.Commit(); err != nil {
-			return menu.Order{}, fmt.Errorf("commit unchanged status: %w", err)
+			return models.Order{}, fmt.Errorf("commit unchanged status: %w", err)
 		}
 		return s.orderByID(ctx, orderID)
 	}
 	if currentStatus != "submitted" || (status != "sold" && status != "cancelled") {
-		return menu.Order{}, ErrInvalidTransition
+		return models.Order{}, ErrInvalidTransition
 	}
 
 	if status == "sold" {
@@ -530,7 +533,7 @@ func (s *service) UpdateOrderStatus(ctx context.Context, orderID, status string)
 			SELECT item_id, SUM(quantity) FROM customer_order_items
 			WHERE order_id = $1 GROUP BY item_id`, orderID)
 		if err != nil {
-			return menu.Order{}, fmt.Errorf("query order quantities: %w", err)
+			return models.Order{}, fmt.Errorf("query order quantities: %w", err)
 		}
 		type quantity struct {
 			itemID string
@@ -541,12 +544,12 @@ func (s *service) UpdateOrderStatus(ctx context.Context, orderID, status string)
 			var value quantity
 			if err := rows.Scan(&value.itemID, &value.count); err != nil {
 				rows.Close()
-				return menu.Order{}, fmt.Errorf("scan order quantity: %w", err)
+				return models.Order{}, fmt.Errorf("scan order quantity: %w", err)
 			}
 			quantities = append(quantities, value)
 		}
 		if err := rows.Close(); err != nil {
-			return menu.Order{}, fmt.Errorf("close order quantities: %w", err)
+			return models.Order{}, fmt.Errorf("close order quantities: %w", err)
 		}
 		for _, value := range quantities {
 			result, err := tx.ExecContext(ctx, `
@@ -554,34 +557,34 @@ func (s *service) UpdateOrderStatus(ctx context.Context, orderID, status string)
 				SET quantity_available = quantity_available - $2, updated_at = NOW()
 				WHERE id = $1 AND quantity_available >= $2`, value.itemID, value.count)
 			if err != nil {
-				return menu.Order{}, fmt.Errorf("decrement sold inventory: %w", err)
+				return models.Order{}, fmt.Errorf("decrement sold inventory: %w", err)
 			}
 			affected, _ := result.RowsAffected()
 			if affected != 1 {
-				return menu.Order{}, ErrInsufficientStock
+				return models.Order{}, ErrInsufficientStock
 			}
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE customer_orders SET status = 'sold', sold_at = NOW(), updated_at = NOW()
 			WHERE id = $1`, orderID); err != nil {
-			return menu.Order{}, fmt.Errorf("mark order sold: %w", err)
+			return models.Order{}, fmt.Errorf("mark order sold: %w", err)
 		}
 	} else {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE customer_orders SET status = 'cancelled', updated_at = NOW()
 			WHERE id = $1`, orderID); err != nil {
-			return menu.Order{}, fmt.Errorf("cancel order: %w", err)
+			return models.Order{}, fmt.Errorf("cancel order: %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return menu.Order{}, fmt.Errorf("commit order status: %w", err)
+		return models.Order{}, fmt.Errorf("commit order status: %w", err)
 	}
 	return s.orderByID(ctx, orderID)
 }
 
-func (s *service) orderByID(ctx context.Context, orderID string) (menu.Order, error) {
-	var order menu.Order
+func (s *service) orderByID(ctx context.Context, orderID string) (models.Order, error) {
+	var order models.Order
 	var soldAt sql.NullTime
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT id, order_number, customer_name, notes, status, currency,
@@ -592,20 +595,20 @@ func (s *service) orderByID(ctx context.Context, orderID string) (menu.Order, er
 		&order.CreatedAt, &soldAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
-			return menu.Order{}, ErrNotFound
+			return models.Order{}, ErrNotFound
 		}
-		return menu.Order{}, fmt.Errorf("query order: %w", err)
+		return models.Order{}, fmt.Errorf("query order: %w", err)
 	}
 	if soldAt.Valid {
 		order.SoldAt = &soldAt.Time
 	}
 	if err := s.loadOrderItems(ctx, &order); err != nil {
-		return menu.Order{}, err
+		return models.Order{}, err
 	}
 	return order, nil
 }
 
-func (s *service) loadOrderItems(ctx context.Context, order *menu.Order) error {
+func (s *service) loadOrderItems(ctx context.Context, order *models.Order) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, item_id, item_name, quantity, unit_price_cents, line_total_cents
 		FROM customer_order_items WHERE order_id = $1 ORDER BY id`, order.ID)
@@ -613,10 +616,10 @@ func (s *service) loadOrderItems(ctx context.Context, order *menu.Order) error {
 		return fmt.Errorf("query order items: %w", err)
 	}
 	defer rows.Close()
-	order.Items = []menu.QuoteLineItem{}
+	order.Items = []models.QuoteLineItem{}
 	for rows.Next() {
 		var lineID int64
-		var item menu.QuoteLineItem
+		var item models.QuoteLineItem
 		if err := rows.Scan(
 			&lineID, &item.ItemID, &item.Name, &item.Quantity,
 			&item.UnitPriceCents, &item.LineTotalCents,
@@ -629,9 +632,9 @@ func (s *service) loadOrderItems(ctx context.Context, order *menu.Order) error {
 		if err != nil {
 			return fmt.Errorf("query order options: %w", err)
 		}
-		item.Options = []menu.SelectedQuoteOption{}
+		item.Options = []models.SelectedQuoteOption{}
 		for optionRows.Next() {
-			var option menu.SelectedQuoteOption
+			var option models.SelectedQuoteOption
 			if err := optionRows.Scan(&option.ID, &option.Name, &option.PriceDeltaCents); err != nil {
 				optionRows.Close()
 				return fmt.Errorf("scan order option: %w", err)
@@ -646,22 +649,22 @@ func (s *service) loadOrderItems(ctx context.Context, order *menu.Order) error {
 	return rows.Err()
 }
 
-func (s *service) MenuQR(ctx context.Context) (dub.Link, error) {
-	var link dub.Link
+func (s *service) MenuQR(ctx context.Context) (models.Link, error) {
+	var link models.Link
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT dub_link_id, short_link, qr_code, destination, created_at
 		FROM menu_qr_link WHERE singleton = TRUE`).Scan(
 		&link.ID, &link.ShortLink, &link.QRCode, &link.Destination, &link.CreatedAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
-			return dub.Link{}, ErrNotFound
+			return models.Link{}, ErrNotFound
 		}
-		return dub.Link{}, fmt.Errorf("query menu QR link: %w", err)
+		return models.Link{}, fmt.Errorf("query menu QR link: %w", err)
 	}
 	return link, nil
 }
 
-func (s *service) SaveMenuQR(ctx context.Context, link dub.Link) error {
+func (s *service) SaveMenuQR(ctx context.Context, link models.Link) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO menu_qr_link
 		    (singleton, dub_link_id, short_link, qr_code, destination, created_at)
