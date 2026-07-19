@@ -34,3 +34,5 @@ vanilla-api
 .DS_Store
 
 docs
+
+API_CALLS.md

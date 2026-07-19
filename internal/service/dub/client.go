@@ -17,7 +17,7 @@ import (
 
 type Service interface {
 	CreateMenuLink(context.Context, string, string, string) (models.Link, error)
-	RetrieveMenuLink(context.Context, string) (models.Link, error)
+	RetrieveMenuLink(context.Context, string, string, string) (models.Link, error)
 	QRCode(context.Context, string) ([]byte, error)
 }
 
@@ -39,9 +39,8 @@ func New(token string) *Client {
 
 func (c *Client) CreateMenuLink(ctx context.Context, destination, domain, key string) (models.Link, error) {
 	payload := map[string]any{
-		"url":        destination,
-		"externalId": "vanilla-api-menu",
-		"comments":   "Vanilla in-store menu QR code",
+		"url":      destination,
+		"comments": "Vanilla in-store menu QR code",
 	}
 	if domain != "" {
 		payload["domain"] = domain
@@ -81,13 +80,17 @@ func (c *Client) CreateMenuLink(ctx context.Context, destination, domain, key st
 	return link, nil
 }
 
-func (c *Client) RetrieveMenuLink(ctx context.Context, linkID string) (models.Link, error) {
+func (c *Client) RetrieveMenuLink(ctx context.Context, linkID, domain, key string) (models.Link, error) {
 	endpoint, _ := url.Parse(c.baseURL + "/links/info")
 	query := endpoint.Query()
 	if linkID != "" {
 		query.Set("linkId", linkID)
 	} else {
-		query.Set("externalId", "vanilla-api-menu")
+		if domain == "" || key == "" {
+			return models.Link{}, fmt.Errorf("Dub domain and link key are required")
+		}
+		query.Set("domain", domain)
+		query.Set("key", key)
 	}
 	endpoint.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)

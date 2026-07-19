@@ -15,9 +15,9 @@ func TestQRCodeRejectsNonDubURL(t *testing.T) {
 	}
 }
 
-func TestRetrieveMenuLinkUsesExternalIDAndDecodesQRCode(t *testing.T) {
+func TestRetrieveMenuLinkUsesDomainAndKeyAndDecodesQRCode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/links/info" || request.URL.Query().Get("externalId") != "vanilla-api-menu" {
+		if request.URL.Path != "/links/info" || request.URL.Query().Get("domain") != "dub.sh" || request.URL.Query().Get("key") != "diAI31C" {
 			t.Fatalf("unexpected request URL: %s", request.URL.String())
 		}
 		if request.Header.Get("Authorization") != "Bearer dub_test" {
@@ -36,11 +36,27 @@ func TestRetrieveMenuLinkUsesExternalIDAndDecodesQRCode(t *testing.T) {
 
 	client := New("dub_test")
 	client.baseURL = server.URL
-	link, err := client.RetrieveMenuLink(context.Background(), "")
+	link, err := client.RetrieveMenuLink(context.Background(), "", "dub.sh", "diAI31C")
 	if err != nil {
 		t.Fatalf("RetrieveMenuLink() returned an error: %v", err)
 	}
 	if link.ID != "link_1" || link.QRCode != "https://api.dub.co/qr?url=https://dub.sh/menu" {
 		t.Fatalf("unexpected link: %+v", link)
+	}
+}
+
+func TestRetrieveMenuLinkUsesStoredLinkID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("linkId") != "link_1" {
+			t.Fatalf("unexpected request URL: %s", request.URL.String())
+		}
+		fmt.Fprint(response, `{"id":"link_1","url":"https://menu.example.com"}`)
+	}))
+	defer server.Close()
+
+	client := New("dub_test")
+	client.baseURL = server.URL
+	if _, err := client.RetrieveMenuLink(context.Background(), "link_1", "", ""); err != nil {
+		t.Fatalf("RetrieveMenuLink() returned an error: %v", err)
 	}
 }

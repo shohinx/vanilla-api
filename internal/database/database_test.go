@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"errors"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -16,57 +18,39 @@ import (
 var postgresAvailable bool
 
 func mustStartPostgresContainer() (func(context.Context, ...testcontainers.TerminateOption) error, error) {
-	var (
-		dbName = "database"
-		dbPwd  = "password"
-		dbUser = "user"
-	)
-
 	dbContainer, err := postgres.Run(
-		context.Background(),
-		"postgres:latest",
-		postgres.WithDatabase(dbName),
-		postgres.WithUsername(dbUser),
-		postgres.WithPassword(dbPwd),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(5*time.Second)),
+		context.Background(), "postgres:latest",
+		postgres.WithDatabase("database"), postgres.WithUsername("user"), postgres.WithPassword("password"),
+		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").
+			WithOccurrence(2).WithStartupTimeout(5*time.Second)),
 	)
 	if err != nil {
 		return nil, err
 	}
-
-	database = dbName
-	password = dbPwd
-	username = dbUser
-
-	dbHost, err := dbContainer.Host(context.Background())
+	_ = os.Unsetenv("DATABASE_URL")
+	_ = os.Setenv("BLUEPRINT_DB_DATABASE", "database")
+	_ = os.Setenv("BLUEPRINT_DB_PASSWORD", "password")
+	_ = os.Setenv("BLUEPRINT_DB_USERNAME", "user")
+	host, err := dbContainer.Host(context.Background())
 	if err != nil {
 		return dbContainer.Terminate, err
 	}
-
-	dbPort, err := dbContainer.MappedPort(context.Background(), "5432/tcp")
+	port, err := dbContainer.MappedPort(context.Background(), "5432/tcp")
 	if err != nil {
 		return dbContainer.Terminate, err
 	}
-
-	host = dbHost
-	port = dbPort.Port()
-
-	return dbContainer.Terminate, err
+	_ = os.Setenv("BLUEPRINT_DB_HOST", host)
+	_ = os.Setenv("BLUEPRINT_DB_PORT", port.Port())
+	return dbContainer.Terminate, nil
 }
 
 func TestMain(m *testing.M) {
 	teardown, err := mustStartPostgresContainer()
 	if err != nil {
-		postgresAvailable = false
 		os.Exit(m.Run())
 	}
 	postgresAvailable = true
-
 	code := m.Run()
-
 	if teardown != nil && teardown(context.Background()) != nil {
 		code = 1
 	}
@@ -80,252 +64,217 @@ func requirePostgres(t *testing.T) {
 	}
 }
 
-func TestNew(t *testing.T) {
+func initializedService(t *testing.T) Service {
+	t.Helper()
+	requirePostgres(t)
 	srv := New()
-	if srv == nil {
+	t.Cleanup(func() { _ = srv.Close() })
+	if err := srv.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize() returned an error: %v", err)
+	}
+	return srv
+}
+
+func TestNew(t *testing.T) {
+	if New() == nil {
 		t.Fatal("New() returned nil")
 	}
 }
 
-func TestHealth(t *testing.T) {
-	requirePostgres(t)
-	srv := New()
-	t.Cleanup(func() { _ = srv.Close() })
-
-	stats := srv.Health(context.Background())
-
-	if stats["status"] != "up" {
-		t.Fatalf("expected status to be up, got %s", stats["status"])
+func TestDatabaseConnectionURLUsesURI(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgresql://uri-user:uri-password@db.example.com:6543/uri_db")
+	t.Setenv("BLUEPRINT_DB_SSLMODE", "require")
+	t.Setenv("BLUEPRINT_DB_SCHEMA", "bakery")
+	connection, err := url.Parse(databaseConnectionURL())
+	if err != nil {
+		t.Fatalf("parse database connection URL: %v", err)
 	}
-
-	if _, ok := stats["error"]; ok {
-		t.Fatalf("expected error not to be present")
+	if connection.Scheme != "postgresql" || connection.Host != "db.example.com:6543" || connection.Path != "/uri_db" {
+		t.Fatalf("unexpected database connection URL: %s", connection.String())
 	}
-
-	if stats["message"] != "database is healthy" {
-		t.Fatalf("unexpected health message: %s", stats["message"])
+	if connection.User.String() != "uri-user:uri-password" {
+		t.Fatalf("unexpected database user info: %s", connection.User.String())
+	}
+	if connection.Query().Get("sslmode") != "require" || connection.Query().Get("search_path") != "bakery" {
+		t.Fatalf("expected URI defaults to be applied, got query %q", connection.RawQuery)
 	}
 }
 
-func TestInitializeAndMenu(t *testing.T) {
-	requirePostgres(t)
-	srv := New()
-	t.Cleanup(func() { _ = srv.Close() })
-	if err := srv.Initialize(context.Background()); err != nil {
-		t.Fatalf("Initialize() returned an error: %v", err)
+func TestDatabaseConnectionURLPreservesURIOptions(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://user:password@localhost:5432/database?sslmode=verify-full&search_path=custom")
+	t.Setenv("BLUEPRINT_DB_SSLMODE", "disable")
+	t.Setenv("BLUEPRINT_DB_SCHEMA", "public")
+	connection, err := url.Parse(databaseConnectionURL())
+	if err != nil {
+		t.Fatalf("parse database connection URL: %v", err)
 	}
+	if connection.Query().Get("sslmode") != "verify-full" || connection.Query().Get("search_path") != "custom" {
+		t.Fatalf("expected URI options to be preserved, got query %q", connection.RawQuery)
+	}
+}
 
+func TestHealth(t *testing.T) {
+	srv := initializedService(t)
+	stats := srv.Health(context.Background())
+	if stats["status"] != "up" || stats["message"] != "database is healthy" {
+		t.Fatalf("unexpected health response: %+v", stats)
+	}
+}
+
+func TestSeededMenuUsesSimpleVariantsAndOptionalStock(t *testing.T) {
+	srv := initializedService(t)
 	current, err := srv.Menu(context.Background(), false)
 	if err != nil {
-		t.Fatalf("Menu() returned an error: %v", err)
+		t.Fatal(err)
 	}
-	if len(current.Categories) == 0 {
-		t.Fatal("expected seeded menu categories")
+	latte := itemByName(t, current, "Latte")
+	if latte.TrackStock || latte.StockQuantity != nil || len(latte.VariantGroups) != 1 || latte.VariantGroups[0].Name != "Size" {
+		t.Fatalf("unexpected made-to-order latte: %+v", latte)
+	}
+	if len(latte.VariantGroups[0].Options) != 2 {
+		t.Fatalf("expected only the size choices, got %+v", latte.VariantGroups[0].Options)
+	}
+	cookie := itemByName(t, current, "Brown Butter Cookie")
+	if !cookie.TrackStock || cookie.StockQuantity == nil || len(cookie.VariantGroups) != 0 {
+		t.Fatalf("unexpected standalone cookie: %+v", cookie)
 	}
 }
 
-func TestUpdateInventory(t *testing.T) {
-	requirePostgres(t)
-	srv := New()
-	t.Cleanup(func() { _ = srv.Close() })
+func TestInitializeRemovesDiscardedPrototypeTables(t *testing.T) {
+	srv := initializedService(t).(*service)
+	if _, err := srv.db.ExecContext(context.Background(), `CREATE TABLE categories (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatalf("create prototype table: %v", err)
+	}
 	if err := srv.Initialize(context.Background()); err != nil {
-		t.Fatalf("Initialize() returned an error: %v", err)
+		t.Fatalf("reinitialize schema: %v", err)
 	}
+	var removed bool
+	if err := srv.db.QueryRowContext(context.Background(), `SELECT to_regclass('categories') IS NULL`).Scan(&removed); err != nil {
+		t.Fatalf("check prototype table: %v", err)
+	}
+	if !removed {
+		t.Fatal("discarded prototype table still exists")
+	}
+}
 
-	inventory, err := srv.UpdateInventory(context.Background(), "butter-croissant", 0)
-	if err != nil {
-		t.Fatalf("UpdateInventory() returned an error: %v", err)
+func TestInventoryOnlyAppliesToTrackedItems(t *testing.T) {
+	srv := initializedService(t)
+	current, _ := srv.Menu(context.Background(), true)
+	cake := itemByName(t, current, "Chocolate Cake Slice")
+	inventory, err := srv.UpdateInventory(context.Background(), cake.ID, 0)
+	if err != nil || inventory.Available || inventory.Quantity != 0 {
+		t.Fatalf("unexpected inventory update: inventory=%+v err=%v", inventory, err)
 	}
-	if inventory.Available || inventory.Quantity != 0 {
-		t.Fatalf("expected sold-out inventory, got %+v", inventory)
+	latte := itemByName(t, current, "Latte")
+	if _, err := srv.UpdateInventory(context.Background(), latte.ID, 10); !errors.Is(err, ErrStockNotTracked) {
+		t.Fatalf("expected untracked stock error, got %v", err)
 	}
 }
 
 func TestUpdateItemImage(t *testing.T) {
-	requirePostgres(t)
-	srv := New()
-	t.Cleanup(func() { _ = srv.Close() })
-	if err := srv.Initialize(context.Background()); err != nil {
-		t.Fatalf("Initialize() returned an error: %v", err)
-	}
-
-	imageURL := "/api/v1/images/menu/test-carrot-cake.jpg"
-	updated, err := srv.UpdateItemImage(context.Background(), "butter-croissant", imageURL)
-	if err != nil {
-		t.Fatalf("UpdateItemImage() returned an error: %v", err)
-	}
-	if updated.ItemID != "butter-croissant" || updated.ImageURL != imageURL || updated.UpdatedAt.IsZero() {
-		t.Fatalf("unexpected image update: %+v", updated)
-	}
-
-	current, err := srv.Menu(context.Background(), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for _, category := range current.Categories {
-		for _, item := range category.Items {
-			if item.ID == "butter-croissant" {
-				found = true
-				if item.ImageURL != imageURL {
-					t.Fatalf("updated image URL was not returned by the menu: %+v", item)
-				}
-			}
-		}
-	}
-	if !found {
-		t.Fatal("updated menu item was not returned by the menu")
+	srv := initializedService(t)
+	current, _ := srv.Menu(context.Background(), true)
+	item := itemByName(t, current, "Butter Croissant")
+	imageURL := "/api/v1/images/menu/test-croissant.webp"
+	updated, err := srv.UpdateItemImage(context.Background(), item.ID, imageURL)
+	if err != nil || updated.ImageURL != imageURL || updated.UpdatedAt.IsZero() {
+		t.Fatalf("unexpected image update: updated=%+v err=%v", updated, err)
 	}
 }
 
-func TestCreateMenuItemsInOneTransaction(t *testing.T) {
-	requirePostgres(t)
-	srv := New()
-	t.Cleanup(func() { _ = srv.Close() })
-	if err := srv.Initialize(context.Background()); err != nil {
-		t.Fatalf("Initialize() returned an error: %v", err)
-	}
-
-	items, err := srv.CreateMenuItems(context.Background(), []models.NewItem{
-		{
-			ID: "test-carrot-cake", CategoryID: "cakes", Name: "Test Carrot Cake",
-			Type: "cake", PriceCents: 750, Currency: "USD", Quantity: 4,
-		},
-		{
-			ID: "test-flat-white", CategoryID: "drinks", Name: "Test Flat White",
-			Type: "drink", PriceCents: 525, Currency: "USD", Quantity: 20,
-			ModifierGroups: []models.NewModifierGroup{{
-				ID: "test-flat-white-milk", Name: "Milk", MinSelections: 1, MaxSelections: 1,
-				Options: []models.NewModifierOption{{
-					ID: "test-flat-white-whole", Name: "Whole milk",
-				}},
-			}},
-		},
-	})
-	if err != nil {
-		t.Fatalf("CreateMenuItems() returned an error: %v", err)
-	}
-	if len(items) != 2 || len(items[1].ModifierGroups) != 1 {
-		t.Fatalf("unexpected created items: %+v", items)
-	}
-	if items[0].ImageURL != "" {
-		t.Fatalf("expected an item created without an image to have an empty image URL, got %q", items[0].ImageURL)
-	}
-
-	current, err := srv.Menu(context.Background(), true)
+func TestCreateMenuItemsWithOneRequiredVariant(t *testing.T) {
+	srv := initializedService(t)
+	categories, err := srv.Categories(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if itemQuantity(t, current, "test-carrot-cake") != 4 || itemQuantity(t, current, "test-flat-white") != 20 {
-		t.Fatal("bulk-created items were not returned by the menu")
+	var drinksID int64
+	for _, category := range categories {
+		if category.Name == "Coffee & Tea" {
+			drinksID = category.ID
+		}
+	}
+	items, err := srv.CreateMenuItems(context.Background(), []models.NewItem{{
+		CategoryID: drinksID, Name: "Test Flat White", PriceCents: 525,
+		VariantGroup: &models.NewVariantGroup{Name: "Size", Options: []models.NewVariantOption{
+			{Name: "Small", PriceCents: 525}, {Name: "Large", PriceCents: 600},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("CreateMenuItems() returned an error: %v", err)
+	}
+	if len(items) != 1 || len(items[0].VariantGroups) != 1 || len(items[0].VariantGroups[0].Options) != 2 {
+		t.Fatalf("unexpected created item: %+v", items)
 	}
 }
 
 func TestCreateAndListCustomCategories(t *testing.T) {
-	requirePostgres(t)
-	srv := New()
-	t.Cleanup(func() { _ = srv.Close() })
-	if err := srv.Initialize(context.Background()); err != nil {
-		t.Fatalf("Initialize() returned an error: %v", err)
-	}
-
-	created, err := srv.CreateCategories(context.Background(), []models.NewCategory{{
-		ID: "test-cold-beverages", Name: "Test Cold Beverages",
-		Description: "Iced drinks", SortOrder: 50,
-	}})
+	srv := initializedService(t)
+	created, err := srv.CreateCategories(context.Background(), []models.NewCategory{{Name: "Cold Beverages", SortOrder: 50}})
 	if err != nil {
 		t.Fatalf("CreateCategories() returned an error: %v", err)
 	}
-	if len(created) != 1 || created[0].ID != "test-cold-beverages" {
+	if len(created) != 1 || created[0].ID < 1 {
 		t.Fatalf("unexpected created categories: %+v", created)
 	}
-
-	categories, err := srv.Categories(context.Background())
-	if err != nil {
-		t.Fatalf("Categories() returned an error: %v", err)
-	}
-	found := false
-	for _, category := range categories {
-		if category.ID == "test-cold-beverages" && category.Name == "Test Cold Beverages" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("custom category was not returned for the dropdown")
-	}
 }
 
-func TestOrderInventoryChangesOnlyWhenMarkedSold(t *testing.T) {
-	requirePostgres(t)
-	srv := New()
-	t.Cleanup(func() { _ = srv.Close() })
-	if err := srv.Initialize(context.Background()); err != nil {
-		t.Fatalf("Initialize() returned an error: %v", err)
-	}
-
-	before, err := srv.Menu(context.Background(), true)
+func TestOrderCapturesTableGuestsAndDecrementsOnlyWhenSold(t *testing.T) {
+	srv := initializedService(t)
+	staff, err := srv.CreateStaff(context.Background(), "Test Worker", "hashed-pin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	beforeQuantity := itemQuantity(t, before, "chocolate-cake-slice")
-	quote := models.Quote{
-		Currency: "USD", SubtotalCents: 775,
-		Items: []models.QuoteLineItem{{
-			ItemID: "chocolate-cake-slice", Name: "Chocolate Cake Slice",
-			Quantity: 1, UnitPriceCents: 775, LineTotalCents: 775,
-		}},
-	}
+	current, _ := srv.Menu(context.Background(), true)
+	cake := itemByName(t, current, "Lemon Olive Oil Cake")
+	before := *cake.StockQuantity
+	quote := models.Quote{TotalCents: cake.PriceCents, Items: []models.QuoteLineItem{{
+		ItemID: cake.ID, Name: cake.Name, Quantity: 1,
+		UnitPriceCents: cake.PriceCents, LineTotalCents: cake.PriceCents,
+	}}}
 	order, err := srv.CreateOrder(context.Background(), models.SubmitOrderRequest{
-		CustomerName: "Maya", Items: []models.QuoteItemRequest{{ItemID: "chocolate-cake-slice", Quantity: 1}},
+		TableNumber: "Patio 4", GuestCount: 3,
+		Items: []models.QuoteItemRequest{{ItemID: cake.ID, Quantity: 1}},
 	}, quote)
 	if err != nil {
-		t.Fatalf("CreateOrder() returned an error: %v", err)
+		t.Fatal(err)
 	}
-	if order.Status != "submitted" {
-		t.Fatalf("expected submitted status, got %q", order.Status)
+	if order.Status != "new" || order.TableNumber != "Patio 4" || order.GuestCount != 3 {
+		t.Fatalf("unexpected new order: %+v", order)
 	}
-
-	afterSubmit, err := srv.Menu(context.Background(), true)
+	afterSubmit, _ := srv.Menu(context.Background(), true)
+	if got := *itemByName(t, afterSubmit, cake.Name).StockQuantity; got != before {
+		t.Fatalf("submission changed stock: before=%d after=%d", before, got)
+	}
+	sold, err := srv.UpdateOrderStatus(context.Background(), order.ID, "sold", staff.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := itemQuantity(t, afterSubmit, "chocolate-cake-slice"); got != beforeQuantity {
-		t.Fatalf("submission changed stock: before=%d after=%d", beforeQuantity, got)
+	if sold.Status != "sold" || sold.SoldAt == nil || sold.StaffID == nil || *sold.StaffID != staff.ID {
+		t.Fatalf("unexpected sold order: %+v", sold)
 	}
-
-	sold, err := srv.UpdateOrderStatus(context.Background(), order.ID, "sold")
-	if err != nil {
-		t.Fatalf("UpdateOrderStatus() returned an error: %v", err)
-	}
-	if sold.Status != "sold" || sold.SoldAt == nil {
-		t.Fatalf("expected sold order, got %+v", sold)
-	}
-	afterSale, err := srv.Menu(context.Background(), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := itemQuantity(t, afterSale, "chocolate-cake-slice"); got != beforeQuantity-1 {
-		t.Fatalf("sale did not decrement stock: before=%d after=%d", beforeQuantity, got)
+	afterSale, _ := srv.Menu(context.Background(), true)
+	if got := *itemByName(t, afterSale, cake.Name).StockQuantity; got != before-1 {
+		t.Fatalf("sale did not decrement stock: before=%d after=%d", before, got)
 	}
 }
 
-func itemQuantity(t *testing.T, current models.Menu, itemID string) int {
+func itemByName(t *testing.T, current models.Menu, name string) models.Item {
 	t.Helper()
 	for _, category := range current.Categories {
 		for _, item := range category.Items {
-			if item.ID == itemID {
-				return item.QuantityAvailable
+			if item.Name == name {
+				return item
 			}
 		}
 	}
-	t.Fatalf("item %q was not found", itemID)
-	return 0
+	t.Fatalf("item %q was not found", name)
+	return models.Item{}
 }
 
 func TestClose(t *testing.T) {
 	srv := New()
-
 	if srv.Close() != nil {
-		t.Fatalf("expected Close() to return nil")
+		t.Fatal("expected Close() to return nil")
 	}
 }

@@ -53,9 +53,9 @@ func NewServer() (*http.Server, error) {
 		AdminAPIKey:    os.Getenv("ADMIN_API_KEY"),
 		MenuAppURL:     os.Getenv("MENU_APP_URL"),
 		AllowedOrigins: splitCSV(envOrDefault("ALLOWED_ORIGINS", "http://localhost:5173")),
-		DubAPIKey:      os.Getenv("DUB_API_KEY"),
-		DubDomain:      os.Getenv("DUB_DOMAIN"),
-		DubLinkKey:     envOrDefault("DUB_LINK_KEY", "menu"),
+		DubAPIKey:      strings.TrimSpace(os.Getenv("DUB_API_KEY")),
+		DubDomain:      strings.TrimSpace(os.Getenv("DUB_DOMAIN")),
+		DubLinkKey:     strings.TrimSpace(os.Getenv("DUB_LINK_KEY")),
 		PublicBaseURL:  strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"),
 	}
 	imageService, err := seaweedfs.New(context.Background(), seaweedfs.Config{

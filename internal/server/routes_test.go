@@ -25,22 +25,25 @@ type fakeDatabase struct {
 	menu               models.Menu
 	includeUnavailable bool
 	inventory          models.Inventory
-	updateItemID       string
+	updateItemID       int64
 	updateQuantity     int
 	updatedImage       models.ItemImage
-	updateImageItemID  string
+	updateImageItemID  int64
 	updateImageURL     string
 	updateImageErr     error
 	createdOrder       models.Order
 	orders             []models.Order
 	updatedOrder       models.Order
-	updatedOrderID     string
+	updatedOrderID     int64
 	updatedStatus      string
+	updatedStaffID     int64
 	qrLink             models.Link
 	createdRequest     models.SubmitOrderRequest
 	createdMenuItems   []models.NewItem
 	categories         []models.MenuCategory
 	createdCategories  []models.NewCategory
+	staff              []models.Staff
+	staffPINHash       string
 }
 
 func (f *fakeDatabase) Initialize(context.Context) error { return nil }
@@ -62,19 +65,26 @@ func (f *fakeDatabase) CreateCategories(_ context.Context, categories []models.N
 	created := make([]models.MenuCategory, 0, len(categories))
 	for _, category := range categories {
 		created = append(created, models.MenuCategory{
-			ID: category.ID, Name: category.Name,
-			Description: category.Description, SortOrder: category.SortOrder,
+			ID: int64(len(created) + 1), Name: category.Name, SortOrder: category.SortOrder,
 		})
 	}
 	return created, nil
 }
-func (f *fakeDatabase) UpdateInventory(_ context.Context, itemID string, quantity int) (models.Inventory, error) {
+func (f *fakeDatabase) UpdateInventory(_ context.Context, itemID int64, quantity int) (models.Inventory, error) {
 	f.updateItemID = itemID
 	f.updateQuantity = quantity
 	return f.inventory, nil
 }
 
-func (f *fakeDatabase) UpdateItemImage(_ context.Context, itemID, imageURL string) (models.ItemImage, error) {
+func (f *fakeDatabase) UpdateVariantInventory(_ context.Context, variantID int64, quantity int) (models.VariantInventory, error) {
+	return models.VariantInventory{VariantOptionID: variantID, Quantity: quantity, Available: quantity > 0}, nil
+}
+
+func (f *fakeDatabase) UpdateItemAvailability(_ context.Context, itemID int64, available bool) (models.ItemAvailability, error) {
+	return models.ItemAvailability{ItemID: itemID, Available: available}, nil
+}
+
+func (f *fakeDatabase) UpdateItemImage(_ context.Context, itemID int64, imageURL string) (models.ItemImage, error) {
 	f.updateImageItemID = itemID
 	f.updateImageURL = imageURL
 	if f.updateImageErr != nil {
@@ -94,7 +104,7 @@ func (f *fakeDatabase) CreateMenuItems(_ context.Context, items []models.NewItem
 			imageURL = *item.ImageURL
 		}
 		created = append(created, models.Item{
-			ID: item.ID, Name: item.Name, ImageURL: imageURL, Currency: item.Currency,
+			ID: int64(len(created) + 1), Name: item.Name, ImageURL: imageURL, PriceCents: item.PriceCents,
 		})
 	}
 	return created, nil
@@ -103,8 +113,7 @@ func (f *fakeDatabase) CreateMenuItems(_ context.Context, items []models.NewItem
 func (f *fakeDatabase) CreateOrder(_ context.Context, request models.SubmitOrderRequest, quote models.Quote) (models.Order, error) {
 	f.createdRequest = request
 	f.createdOrder.Items = quote.Items
-	f.createdOrder.SubtotalCents = quote.SubtotalCents
-	f.createdOrder.Currency = quote.Currency
+	f.createdOrder.TotalCents = quote.TotalCents
 	return f.createdOrder, nil
 }
 
@@ -112,10 +121,37 @@ func (f *fakeDatabase) Orders(context.Context, string) ([]models.Order, error) {
 	return f.orders, nil
 }
 
-func (f *fakeDatabase) UpdateOrderStatus(_ context.Context, orderID, status string) (models.Order, error) {
+func (f *fakeDatabase) UpdateOrderStatus(_ context.Context, orderID int64, status string, staffID int64) (models.Order, error) {
 	f.updatedOrderID = orderID
 	f.updatedStatus = status
+	f.updatedStaffID = staffID
 	return f.updatedOrder, nil
+}
+
+func (f *fakeDatabase) Staff(context.Context, bool) ([]models.Staff, error) { return f.staff, nil }
+func (f *fakeDatabase) StaffActive(_ context.Context, staffID int64) (bool, error) {
+	for _, member := range f.staff {
+		if member.ID == staffID {
+			return member.Active, nil
+		}
+	}
+	return false, database.ErrNotFound
+}
+func (f *fakeDatabase) StaffCredentials(_ context.Context, name string) (models.Staff, string, error) {
+	for _, member := range f.staff {
+		if member.Name == name {
+			return member, f.staffPINHash, nil
+		}
+	}
+	return models.Staff{}, "", database.ErrNotFound
+}
+func (f *fakeDatabase) CreateStaff(_ context.Context, name, _ string) (models.Staff, error) {
+	member := models.Staff{ID: int64(len(f.staff) + 1), Name: name, Active: true}
+	f.staff = append(f.staff, member)
+	return member, nil
+}
+func (f *fakeDatabase) SetStaffActive(_ context.Context, staffID int64, active bool) (models.Staff, error) {
+	return models.Staff{ID: staffID, Name: "Worker", Active: active}, nil
 }
 
 func (f *fakeDatabase) MenuQR(context.Context) (models.Link, error) {
@@ -167,7 +203,7 @@ func (f *fakeDub) CreateMenuLink(context.Context, string, string, string) (model
 	return f.link, nil
 }
 
-func (f *fakeDub) RetrieveMenuLink(context.Context, string) (models.Link, error) {
+func (f *fakeDub) RetrieveMenuLink(context.Context, string, string, string) (models.Link, error) {
 	if f.retrieveErr != nil {
 		return models.Link{}, f.retrieveErr
 	}
@@ -185,14 +221,13 @@ func testMenu() models.Menu {
 	return models.Menu{
 		GeneratedAt: time.Date(2026, time.July, 16, 12, 0, 0, 0, time.UTC),
 		Categories: []models.Category{{
-			ID: "drinks", Name: "Drinks", Items: []models.Item{{
-				ID: "latte", Name: "Latte", Type: "drink", PriceCents: 550,
-				Currency: "USD", Available: true, QuantityAvailable: 4,
-				ModifierGroups: []models.ModifierGroup{{
-					ID: "latte-size", Name: "Size", MinSelections: 1, MaxSelections: 1,
-					Options: []models.ModifierOption{
-						{ID: "latte-8oz", Name: "8 oz", Available: true},
-						{ID: "latte-12oz", Name: "12 oz", PriceDeltaCents: 75, Available: true},
+			ID: 1, Name: "Drinks", Items: []models.Item{{
+				ID: 1, Name: "Latte", PriceCents: 550, Available: true,
+				VariantGroups: []models.VariantGroup{{
+					ID: 10, Name: "Size", Required: true,
+					Options: []models.VariantOption{
+						{ID: 11, Name: "Small", PriceCents: 550, Available: true},
+						{ID: 12, Name: "Large", PriceCents: 625, Available: true},
 					},
 				}},
 			}},
@@ -214,7 +249,8 @@ func newTestRouterWithDub(db *fakeDatabase, dubService *fakeDub) http.Handler {
 		MenuAppURL:     "https://models.example.com",
 		AllowedOrigins: []string{"http://localhost:5173"},
 		DubAPIKey:      "dub_test",
-		DubLinkKey:     "menu",
+		DubDomain:      "dub.sh",
+		DubLinkKey:     "diAI31C",
 	}).RegisterRoutes()
 }
 
@@ -391,7 +427,7 @@ func TestPublicImageIsProxiedFromObjectStorage(t *testing.T) {
 
 func TestQuoteHandlerPricesCustomizations(t *testing.T) {
 	db := &fakeDatabase{menu: testMenu()}
-	body := bytes.NewBufferString(`{"items":[{"item_id":"latte","quantity":2,"option_ids":["latte-12oz"]}]}`)
+	body := bytes.NewBufferString(`{"items":[{"item_id":1,"quantity":2,"variant_option_id":12}]}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/order-plans/quote", body)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -408,14 +444,14 @@ func TestQuoteHandlerPricesCustomizations(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &quote); err != nil {
 		t.Fatal(err)
 	}
-	if quote.SubtotalCents != 1250 {
-		t.Fatalf("expected subtotal 1250, got %d", quote.SubtotalCents)
+	if quote.TotalCents != 1250 {
+		t.Fatalf("expected total 1250, got %d", quote.TotalCents)
 	}
 }
 
 func TestQuoteHandlerRejectsMissingRequiredCustomization(t *testing.T) {
 	db := &fakeDatabase{menu: testMenu()}
-	body := bytes.NewBufferString(`{"items":[{"item_id":"latte","quantity":1}]}`)
+	body := bytes.NewBufferString(`{"items":[{"item_id":1,"quantity":1}]}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/order-plans/quote", body)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -430,12 +466,12 @@ func TestQuoteHandlerRejectsMissingRequiredCustomization(t *testing.T) {
 func TestSubmitOrderStoresOrderWithoutUpdatingInventory(t *testing.T) {
 	db := &fakeDatabase{
 		menu:         testMenu(),
-		createdOrder: models.Order{ID: "order-1", OrderNumber: "VL-123456", Status: "submitted"},
+		createdOrder: models.Order{ID: 1, OrderNumber: "VL-123456", Status: "new"},
 	}
 	body := bytes.NewBufferString(`{
-		"customer_name":"Maya",
-		"notes":"At the window table",
-		"items":[{"item_id":"latte","quantity":2,"option_ids":["latte-12oz"]}]
+		"table_number":"Window 3",
+		"guest_count":4,
+		"items":[{"item_id":1,"quantity":2,"variant_option_id":12}]
 	}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/orders", body)
 	request.Header.Set("Content-Type", "application/json")
@@ -446,17 +482,38 @@ func TestSubmitOrderStoresOrderWithoutUpdatingInventory(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("expected status 201, got %d: %s", response.Code, response.Body.String())
 	}
-	if db.createdRequest.CustomerName != "Maya" || db.createdOrder.SubtotalCents != 1250 {
+	if db.createdRequest.TableNumber != "Window 3" || db.createdRequest.GuestCount != 4 || db.createdOrder.TotalCents != 1250 {
 		t.Fatalf("unexpected submitted order: request=%+v order=%+v", db.createdRequest, db.createdOrder)
 	}
-	if db.updateItemID != "" {
+	if db.updateItemID != 0 {
 		t.Fatal("submitting an order must not update inventory")
 	}
 }
 
-func TestAdminCanListSubmittedOrders(t *testing.T) {
-	db := &fakeDatabase{orders: []models.Order{{ID: "order-1", Status: "submitted"}}}
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/orders?status=submitted", nil)
+func TestSubmitOrderRequiresTableNumberAndGuestCount(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing table", body: `{"guest_count":2,"items":[{"item_id":1,"quantity":1,"variant_option_id":11}]}`},
+		{name: "missing guests", body: `{"table_number":"4","items":[{"item_id":1,"quantity":1,"variant_option_id":11}]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/orders", bytes.NewBufferString(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			newTestRouter(&fakeDatabase{menu: testMenu()}).ServeHTTP(response, request)
+			if response.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected status 422, got %d: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestAdminCanListNewOrders(t *testing.T) {
+	db := &fakeDatabase{orders: []models.Order{{ID: 1, Status: "new"}}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/orders?status=new", nil)
 	request.Header.Set("X-Admin-Key", "test-secret")
 	response := httptest.NewRecorder()
 
@@ -467,9 +524,9 @@ func TestAdminCanListSubmittedOrders(t *testing.T) {
 	}
 }
 
-func TestAdminMarksPaidOrderSold(t *testing.T) {
-	db := &fakeDatabase{updatedOrder: models.Order{ID: "order-1", Status: "sold"}}
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/orders/order-1/status", bytes.NewBufferString(`{"status":"sold"}`))
+func TestAdminMarksOrderSoldAsStaff(t *testing.T) {
+	db := &fakeDatabase{updatedOrder: models.Order{ID: 1, Status: "sold"}}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/orders/1/status", bytes.NewBufferString(`{"status":"sold","staff_id":9}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Admin-Key", "test-secret")
 	response := httptest.NewRecorder()
@@ -479,14 +536,47 @@ func TestAdminMarksPaidOrderSold(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
-	if db.updatedOrderID != "order-1" || db.updatedStatus != "sold" {
-		t.Fatalf("unexpected status update: id=%q status=%q", db.updatedOrderID, db.updatedStatus)
+	if db.updatedOrderID != 1 || db.updatedStatus != "sold" || db.updatedStaffID != 9 {
+		t.Fatalf("unexpected status update: id=%d status=%q staff=%d", db.updatedOrderID, db.updatedStatus, db.updatedStaffID)
+	}
+}
+
+func TestStaffLoginTokenAttributesOrderAction(t *testing.T) {
+	pinHash, err := hashPIN("4826")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := &fakeDatabase{
+		staff: []models.Staff{{ID: 7, Name: "Maya", Active: true}}, staffPINHash: pinHash,
+		updatedOrder: models.Order{ID: 1, Status: "sold"},
+	}
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/staff/login", bytes.NewBufferString(`{"name":"Maya","pin":"4826"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	loginResponse := httptest.NewRecorder()
+	newTestRouter(db).ServeHTTP(loginResponse, loginRequest)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("expected login status 200, got %d: %s", loginResponse.Code, loginResponse.Body.String())
+	}
+	var login struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(loginResponse.Body.Bytes(), &login); err != nil || login.AccessToken == "" {
+		t.Fatalf("unexpected login response: body=%s err=%v", loginResponse.Body.String(), err)
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/orders/1/status", bytes.NewBufferString(`{"status":"sold"}`))
+	statusRequest.Header.Set("Content-Type", "application/json")
+	statusRequest.Header.Set("Authorization", "Bearer "+login.AccessToken)
+	statusResponse := httptest.NewRecorder()
+	newTestRouter(db).ServeHTTP(statusResponse, statusRequest)
+	if statusResponse.Code != http.StatusOK || db.updatedStaffID != 7 {
+		t.Fatalf("expected staff-attributed sale, status=%d staff=%d body=%s", statusResponse.Code, db.updatedStaffID, statusResponse.Body.String())
 	}
 }
 
 func TestUpdateInventoryRequiresAdminKey(t *testing.T) {
 	db := &fakeDatabase{}
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/latte/inventory", bytes.NewBufferString(`{"quantity":0}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/1/inventory", bytes.NewBufferString(`{"stock_qty":0}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 
@@ -498,8 +588,8 @@ func TestUpdateInventoryRequiresAdminKey(t *testing.T) {
 }
 
 func TestUpdateInventory(t *testing.T) {
-	db := &fakeDatabase{inventory: models.Inventory{ItemID: "latte", Quantity: 0, Available: false}}
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/latte/inventory", bytes.NewBufferString(`{"quantity":0}`))
+	db := &fakeDatabase{inventory: models.Inventory{ItemID: 1, Quantity: 0, Available: false}}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/1/inventory", bytes.NewBufferString(`{"stock_qty":0}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Admin-Key", "test-secret")
 	response := httptest.NewRecorder()
@@ -509,14 +599,14 @@ func TestUpdateInventory(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
-	if db.updateItemID != "latte" || db.updateQuantity != 0 {
-		t.Fatalf("unexpected update: item=%q quantity=%d", db.updateItemID, db.updateQuantity)
+	if db.updateItemID != 1 || db.updateQuantity != 0 {
+		t.Fatalf("unexpected update: item=%d quantity=%d", db.updateItemID, db.updateQuantity)
 	}
 }
 
 func TestUpdateItemImage(t *testing.T) {
 	db := &fakeDatabase{}
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/carrot-cake/image", bytes.NewBufferString(`{"image_url":" https://api.example.com/api/v1/images/menu/new.jpg "}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/2/image", bytes.NewBufferString(`{"image_url":" https://api.example.com/api/v1/images/menu/new.jpg "}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Admin-Key", "test-secret")
 	response := httptest.NewRecorder()
@@ -526,21 +616,21 @@ func TestUpdateItemImage(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("expected status 200, got %d: %s", response.Code, response.Body.String())
 	}
-	if db.updateImageItemID != "carrot-cake" || db.updateImageURL != "https://api.example.com/api/v1/images/menu/new.jpg" {
-		t.Fatalf("unexpected image update: item=%q image_url=%q", db.updateImageItemID, db.updateImageURL)
+	if db.updateImageItemID != 2 || db.updateImageURL != "https://api.example.com/api/v1/images/menu/new.jpg" {
+		t.Fatalf("unexpected image update: item=%d image_url=%q", db.updateImageItemID, db.updateImageURL)
 	}
 	var result models.ItemImage
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.ItemID != "carrot-cake" || result.ImageURL != db.updateImageURL {
+	if result.ItemID != 2 || result.ImageURL != db.updateImageURL {
 		t.Fatalf("unexpected response: %+v", result)
 	}
 }
 
 func TestUpdateItemImageRequiresAdminKey(t *testing.T) {
 	db := &fakeDatabase{}
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/carrot-cake/image", bytes.NewBufferString(`{"image_url":"/api/v1/images/menu/new.jpg"}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/2/image", bytes.NewBufferString(`{"image_url":"/api/v1/images/menu/new.jpg"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 
@@ -549,14 +639,14 @@ func TestUpdateItemImageRequiresAdminKey(t *testing.T) {
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status 401, got %d", response.Code)
 	}
-	if db.updateImageItemID != "" {
+	if db.updateImageItemID != 0 {
 		t.Fatal("database should not be called without an admin key")
 	}
 }
 
 func TestUpdateItemImageRequiresImageURLField(t *testing.T) {
 	db := &fakeDatabase{}
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/carrot-cake/image", bytes.NewBufferString(`{}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/2/image", bytes.NewBufferString(`{}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Admin-Key", "test-secret")
 	response := httptest.NewRecorder()
@@ -570,7 +660,7 @@ func TestUpdateItemImageRequiresImageURLField(t *testing.T) {
 
 func TestUpdateItemImageCanClearImage(t *testing.T) {
 	db := &fakeDatabase{}
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/carrot-cake/image", bytes.NewBufferString(`{"image_url":""}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/2/image", bytes.NewBufferString(`{"image_url":""}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Admin-Key", "test-secret")
 	response := httptest.NewRecorder()
@@ -584,7 +674,7 @@ func TestUpdateItemImageCanClearImage(t *testing.T) {
 
 func TestUpdateItemImageRejectsInvalidURL(t *testing.T) {
 	db := &fakeDatabase{}
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/carrot-cake/image", bytes.NewBufferString(`{"image_url":"not-a-url"}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/2/image", bytes.NewBufferString(`{"image_url":"not-a-url"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Admin-Key", "test-secret")
 	response := httptest.NewRecorder()
@@ -598,7 +688,7 @@ func TestUpdateItemImageRejectsInvalidURL(t *testing.T) {
 
 func TestUpdateItemImageReturnsNotFound(t *testing.T) {
 	db := &fakeDatabase{updateImageErr: database.ErrNotFound}
-	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/missing/image", bytes.NewBufferString(`{"image_url":"/api/v1/images/menu/new.jpg"}`))
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/items/999/image", bytes.NewBufferString(`{"image_url":"/api/v1/images/menu/new.jpg"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Admin-Key", "test-secret")
 	response := httptest.NewRecorder()
@@ -618,16 +708,17 @@ func TestCreateMenuItemsAcceptsOneOrManyItems(t *testing.T) {
 	}{
 		{
 			name: "one item in the array",
-			body: `[{"id":"carrot-cake-slice","category_id":"cakes","name":"Carrot Cake","type":"cake","price_cents":750,"currency":"usd","quantity":6}]`,
+			body: `[{"category_id":2,"name":"Carrot Cake","price_cents":750,"track_stock":true,"stock_qty":6}]`,
 			want: 1,
 		},
 		{
 			name: "multiple items in the array",
 			body: `[
-				{"id":"carrot-cake-slice","category_id":"cakes","name":"Carrot Cake","type":"cake","price_cents":750,"currency":"USD","quantity":6},
-				{"id":"flat-white","category_id":"drinks","name":"Flat White","type":"drink","price_cents":525,"currency":"USD","quantity":30,
-				 "modifier_groups":[{"id":"flat-white-milk","name":"Milk","min_selections":1,"max_selections":1,
-				 "options":[{"id":"flat-white-whole","name":"Whole milk","price_delta_cents":0}]}]}
+				{"category_id":2,"name":"Carrot Cake","price_cents":750,"track_stock":true,"stock_qty":6},
+				{"category_id":4,"name":"Flat White","price_cents":525,"track_stock":false,
+				 "variant_group":{"name":"Size","options":[
+				 {"name":"Small","price_cents":525,"track_stock":false},
+				 {"name":"Large","price_cents":600,"track_stock":false}]}}
 			]`,
 			want: 2,
 		},
@@ -648,8 +739,8 @@ func TestCreateMenuItemsAcceptsOneOrManyItems(t *testing.T) {
 			if len(db.createdMenuItems) != test.want {
 				t.Fatalf("expected %d created items, got %d", test.want, len(db.createdMenuItems))
 			}
-			if db.createdMenuItems[0].Currency != "USD" {
-				t.Fatalf("expected normalized currency, got %q", db.createdMenuItems[0].Currency)
+			if !db.createdMenuItems[0].TrackStock || db.createdMenuItems[0].StockQuantity == nil {
+				t.Fatalf("expected tracked stock to be retained: %+v", db.createdMenuItems[0])
 			}
 			if db.createdMenuItems[0].ImageURL != nil {
 				t.Fatalf("expected image_url to be optional, got %q", *db.createdMenuItems[0].ImageURL)
@@ -663,7 +754,7 @@ func TestCreateMenuItemsAcceptsAnOptionalImageURL(t *testing.T) {
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/api/v1/admin/menu/items",
-		bytes.NewBufferString(`[{"id":"cookie","category_id":"sweets","name":"Cookie","type":"sweet","image_url":" /api/v1/images/menu/cookie.webp ","price_cents":350,"currency":"USD","quantity":4}]`),
+		bytes.NewBufferString(`[{"category_id":3,"name":"Cookie","image_url":" /api/v1/images/menu/cookie.webp ","price_cents":350,"track_stock":true,"stock_qty":4}]`),
 	)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Admin-Key", "test-secret")
@@ -684,8 +775,8 @@ func TestCreateMenuItemsAcceptsAnOptionalImageURL(t *testing.T) {
 
 func TestAdminCategoryDropdownReturnsAllCategories(t *testing.T) {
 	db := &fakeDatabase{categories: []models.MenuCategory{
-		{ID: "drinks", Name: "Beverages", SortOrder: 10},
-		{ID: "cakes", Name: "Cakes", SortOrder: 20},
+		{ID: 1, Name: "Beverages", SortOrder: 10},
+		{ID: 2, Name: "Cakes", SortOrder: 20},
 	}}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/menu/categories", nil)
 	request.Header.Set("X-Admin-Key", "test-secret")
@@ -710,8 +801,8 @@ func TestAdminCategoryDropdownReturnsAllCategories(t *testing.T) {
 func TestAdminCanCreateCustomCategories(t *testing.T) {
 	db := &fakeDatabase{}
 	body := bytes.NewBufferString(`[
-		{"id":"cold-beverages","name":"Cold Beverages","description":"Iced drinks","sort_order":50},
-		{"id":"savory","name":"Savory Bakes","sort_order":60}
+		{"name":"Cold Beverages","sort_order":50},
+		{"name":"Savory Bakes","sort_order":60}
 	]`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/menu/categories", body)
 	request.Header.Set("Content-Type", "application/json")
@@ -723,7 +814,7 @@ func TestAdminCanCreateCustomCategories(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("expected status 201, got %d: %s", response.Code, response.Body.String())
 	}
-	if len(db.createdCategories) != 2 || db.createdCategories[0].ID != "cold-beverages" {
+	if len(db.createdCategories) != 2 || db.createdCategories[0].Name != "Cold Beverages" {
 		t.Fatalf("unexpected categories: %+v", db.createdCategories)
 	}
 }
