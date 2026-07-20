@@ -32,17 +32,12 @@ type Object struct {
 	ETag          string
 }
 
-type Service interface {
-	Put(context.Context, string, io.Reader, int64, string) error
-	Get(context.Context, string) (Object, error)
-}
-
 type clientAPI interface {
 	PutObject(context.Context, *s3.PutObjectInput, ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 	GetObject(context.Context, *s3.GetObjectInput, ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 }
 
-type service struct {
+type Store struct {
 	client clientAPI
 	bucket string
 }
@@ -50,12 +45,8 @@ type service struct {
 // New returns nil when image storage is completely unconfigured. A partial
 // configuration is rejected so a deployment cannot silently accept uploads
 // without a usable backing store.
-func New(ctx context.Context, config Config) (Service, error) {
-	config.Endpoint = strings.TrimRight(strings.TrimSpace(config.Endpoint), "/")
-	config.Region = strings.TrimSpace(config.Region)
-	config.AccessKey = strings.TrimSpace(config.AccessKey)
-	config.SecretKey = strings.TrimSpace(config.SecretKey)
-	config.Bucket = strings.TrimSpace(config.Bucket)
+func New(ctx context.Context, config Config) (*Store, error) {
+	config = normalizeConfig(config)
 
 	if config.Endpoint == "" && config.AccessKey == "" && config.SecretKey == "" && config.Bucket == "" {
 		return nil, nil
@@ -81,7 +72,16 @@ func New(ctx context.Context, config Config) (Service, error) {
 		options.BaseEndpoint = aws.String(config.Endpoint)
 		options.UsePathStyle = true
 	})
-	return &service{client: client, bucket: config.Bucket}, nil
+	return &Store{client: client, bucket: config.Bucket}, nil
+}
+
+func normalizeConfig(config Config) Config {
+	config.Endpoint = strings.TrimRight(strings.TrimSpace(config.Endpoint), "/")
+	config.Region = strings.TrimSpace(config.Region)
+	config.AccessKey = strings.TrimSpace(config.AccessKey)
+	config.SecretKey = strings.TrimSpace(config.SecretKey)
+	config.Bucket = strings.TrimSpace(config.Bucket)
+	return config
 }
 
 func validateEndpoint(endpoint string) error {
@@ -92,6 +92,9 @@ func validateEndpoint(endpoint string) error {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return errors.New("IMAGE_S3_ENDPOINT must use HTTP or HTTPS")
 	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("IMAGE_S3_ENDPOINT cannot contain credentials, a query, or a fragment")
+	}
 
 	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
 	if host == "amazonaws.com" || strings.HasSuffix(host, ".amazonaws.com") ||
@@ -101,7 +104,19 @@ func validateEndpoint(endpoint string) error {
 	return nil
 }
 
-func (s *service) Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
+func (s *Store) Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {
+	if key == "" {
+		return errors.New("store image: key is required")
+	}
+	if body == nil {
+		return errors.New("store image: body is required")
+	}
+	if size < 0 {
+		return errors.New("store image: size cannot be negative")
+	}
+	if contentType == "" {
+		return errors.New("store image: content type is required")
+	}
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(key),
@@ -116,7 +131,10 @@ func (s *service) Put(ctx context.Context, key string, body io.Reader, size int6
 	return nil
 }
 
-func (s *service) Get(ctx context.Context, key string) (Object, error) {
+func (s *Store) Get(ctx context.Context, key string) (Object, error) {
+	if key == "" {
+		return Object{}, errors.New("load image: key is required")
+	}
 	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -124,9 +142,12 @@ func (s *service) Get(ctx context.Context, key string) (Object, error) {
 	if err != nil {
 		var apiError smithy.APIError
 		if errors.As(err, &apiError) && (apiError.ErrorCode() == "NoSuchKey" || apiError.ErrorCode() == "NotFound") {
-			return Object{}, ErrNotFound
+			return Object{}, fmt.Errorf("%w: %w", ErrNotFound, err)
 		}
 		return Object{}, fmt.Errorf("load image: %w", err)
+	}
+	if result == nil || result.Body == nil {
+		return Object{}, errors.New("load image: storage returned an empty object")
 	}
 	return Object{
 		Body:          result.Body,

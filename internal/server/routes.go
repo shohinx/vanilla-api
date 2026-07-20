@@ -13,10 +13,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -30,15 +32,23 @@ import (
 
 const maxImageBytes int64 = 50 << 20
 
+const optimizedImageExtension = ".webp"
+
+// dummyPINHash keeps failed staff lookups on the same PBKDF2 path as valid
+// users, reducing username-enumeration timing differences.
+const dummyPINHash = "pbkdf2_sha256$210000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
 func (s *Server) RegisterRoutes() http.Handler {
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
-	router.Use(cors.New(cors.Config{
-		AllowOrigins:     s.config.AllowedOrigins,
-		AllowMethods:     []string{"GET", "POST", "PATCH", "OPTIONS"},
-		AllowHeaders:     []string{"Accept", "Authorization", "Content-Type", "X-Admin-Key"},
-		AllowCredentials: false,
-	}))
+	router.Use(s.requestLogger(), s.recoverer(), requestBodyLimit())
+	if len(s.config.AllowedOrigins) != 0 {
+		corsConfig := corsConfiguration(s.config.AllowedOrigins)
+		if err := corsConfig.Validate(); err != nil {
+			s.logger.Error("disable invalid CORS configuration", "error", err)
+		} else {
+			router.Use(cors.New(corsConfig))
+		}
+	}
 
 	router.GET("/", s.serviceHandler)
 	router.GET("/health", s.healthHandler)
@@ -73,6 +83,15 @@ func (s *Server) RegisterRoutes() http.Handler {
 	return router
 }
 
+func corsConfiguration(allowedOrigins []string) cors.Config {
+	return cors.Config{
+		AllowOrigins:     allowedOrigins,
+		AllowMethods:     []string{"GET", "POST", "PATCH", "OPTIONS"},
+		AllowHeaders:     []string{"Accept", "Authorization", "Content-Type", "X-Admin-Key"},
+		AllowCredentials: false,
+	}
+}
+
 func (s *Server) uploadImageHandler(c *gin.Context) {
 	if s.images == nil {
 		writeError(c, http.StatusServiceUnavailable, "image_storage_not_configured", "image storage is not configured", nil)
@@ -104,7 +123,7 @@ func (s *Server) uploadImageHandler(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "invalid_image_upload", "the uploaded image could not be opened", nil)
 		return
 	}
-	defer file.Close()
+	defer func() { reportError(c, file.Close()) }()
 
 	var header [512]byte
 	headerSize, err := io.ReadFull(file, header[:])
@@ -113,8 +132,7 @@ func (s *Server) uploadImageHandler(c *gin.Context) {
 		return
 	}
 	contentType := http.DetectContentType(header[:headerSize])
-	_, supported := imageExtension(contentType)
-	if !supported {
+	if !supportedImageContentType(contentType) {
 		writeError(c, http.StatusUnsupportedMediaType, "unsupported_image_type", "only JPEG, PNG, and WebP images are supported", nil)
 		return
 	}
@@ -136,18 +154,18 @@ func (s *Server) uploadImageHandler(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "image_optimization_failed", "the image could not be optimized", nil)
+		writeFailure(c, http.StatusInternalServerError, "image_optimization_failed", "the image could not be optimized", err)
 		return
 	}
 
-	key, err := newImageKey(".webp")
+	key, err := newImageKey()
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "image_key_failed", "an image key could not be generated", nil)
+		writeFailure(c, http.StatusInternalServerError, "image_key_failed", "an image key could not be generated", err)
 		return
 	}
 	optimizedSize := int64(len(optimized.Data))
 	if err := s.images.Put(c.Request.Context(), key, bytes.NewReader(optimized.Data), optimizedSize, "image/webp"); err != nil {
-		writeError(c, http.StatusBadGateway, "image_upload_failed", "the image could not be stored", nil)
+		writeFailure(c, http.StatusBadGateway, "image_upload_failed", "the image could not be stored", err)
 		return
 	}
 
@@ -186,10 +204,10 @@ func (s *Server) imageHandler(c *gin.Context) {
 			writeError(c, http.StatusNotFound, "image_not_found", "image was not found", nil)
 			return
 		}
-		writeError(c, http.StatusBadGateway, "image_unavailable", "the image could not be loaded", nil)
+		writeFailure(c, http.StatusBadGateway, "image_unavailable", "the image could not be loaded", err)
 		return
 	}
-	defer object.Body.Close()
+	defer func() { reportError(c, object.Body.Close()) }()
 
 	headers := map[string]string{"Cache-Control": "public, max-age=31536000, immutable"}
 	if object.ETag != "" {
@@ -198,25 +216,21 @@ func (s *Server) imageHandler(c *gin.Context) {
 	c.DataFromReader(http.StatusOK, object.ContentLength, object.ContentType, object.Body, headers)
 }
 
-func imageExtension(contentType string) (string, bool) {
+func supportedImageContentType(contentType string) bool {
 	switch contentType {
-	case "image/jpeg":
-		return ".jpg", true
-	case "image/png":
-		return ".png", true
-	case "image/webp":
-		return ".webp", true
+	case "image/jpeg", "image/png", "image/webp":
+		return true
 	default:
-		return "", false
+		return false
 	}
 }
 
-func newImageKey(extension string) (string, error) {
+func newImageKey() (string, error) {
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
 		return "", err
 	}
-	return "menu/" + hex.EncodeToString(random) + extension, nil
+	return "menu/" + hex.EncodeToString(random) + optimizedImageExtension, nil
 }
 
 func validImageKey(key string) bool {
@@ -246,10 +260,11 @@ func (s *Server) serviceHandler(c *gin.Context) {
 }
 
 func (s *Server) healthHandler(c *gin.Context) {
-	health := s.db.Health(c.Request.Context())
+	health, err := s.db.Health(c.Request.Context())
 	status := http.StatusOK
-	if health["status"] != "up" {
+	if err != nil || health["status"] != "up" {
 		status = http.StatusServiceUnavailable
+		reportError(c, err)
 	}
 	c.JSON(status, health)
 }
@@ -265,7 +280,7 @@ func (s *Server) menuAppHandler(c *gin.Context) {
 func (s *Server) menuHandler(c *gin.Context) {
 	current, err := s.db.Menu(c.Request.Context(), false)
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "menu_unavailable", "the live menu could not be loaded", nil)
+		writeFailure(c, http.StatusInternalServerError, "menu_unavailable", "the live menu could not be loaded", err)
 		return
 	}
 	c.Header("Cache-Control", "no-store")
@@ -274,14 +289,13 @@ func (s *Server) menuHandler(c *gin.Context) {
 
 func (s *Server) quoteHandler(c *gin.Context) {
 	var request models.QuoteRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be valid JSON", nil)
+	if !bindJSON(c, &request, "request body must be valid JSON") {
 		return
 	}
 
 	current, err := s.db.Menu(c.Request.Context(), true)
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "menu_unavailable", "the live menu could not be loaded", nil)
+		writeFailure(c, http.StatusInternalServerError, "menu_unavailable", "the live menu could not be loaded", err)
 		return
 	}
 	quote, err := menu.BuildQuote(current, request)
@@ -291,7 +305,7 @@ func (s *Server) quoteHandler(c *gin.Context) {
 			writeError(c, http.StatusUnprocessableEntity, "invalid_order_plan", err.Error(), validationErrors)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "quote_failed", "the order plan could not be priced", nil)
+		writeFailure(c, http.StatusInternalServerError, "quote_failed", "the order plan could not be priced", err)
 		return
 	}
 	c.Header("Cache-Control", "no-store")
@@ -300,12 +314,11 @@ func (s *Server) quoteHandler(c *gin.Context) {
 
 func (s *Server) submitOrderHandler(c *gin.Context) {
 	var request models.SubmitOrderRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be valid JSON", nil)
+	if !bindJSON(c, &request, "request body must be valid JSON") {
 		return
 	}
 	request.TableNumber = strings.TrimSpace(request.TableNumber)
-	if request.TableNumber == "" || len(request.TableNumber) > 30 {
+	if request.TableNumber == "" || utf8.RuneCountInString(request.TableNumber) > 30 {
 		writeError(c, http.StatusUnprocessableEntity, "invalid_table_number", "table_number is required and cannot exceed 30 characters", nil)
 		return
 	}
@@ -316,7 +329,7 @@ func (s *Server) submitOrderHandler(c *gin.Context) {
 
 	current, err := s.db.Menu(c.Request.Context(), true)
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "menu_unavailable", "the live menu could not be loaded", nil)
+		writeFailure(c, http.StatusInternalServerError, "menu_unavailable", "the live menu could not be loaded", err)
 		return
 	}
 	quote, err := menu.BuildQuote(current, models.QuoteRequest{Items: request.Items})
@@ -326,12 +339,12 @@ func (s *Server) submitOrderHandler(c *gin.Context) {
 			writeError(c, http.StatusUnprocessableEntity, "invalid_order", err.Error(), validationErrors)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "order_failed", "the order could not be validated", nil)
+		writeFailure(c, http.StatusInternalServerError, "order_failed", "the order could not be validated", err)
 		return
 	}
 	order, err := s.db.CreateOrder(c.Request.Context(), request, quote)
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "order_failed", "the order could not be submitted", nil)
+		writeFailure(c, http.StatusInternalServerError, "order_failed", "the order could not be submitted", err)
 		return
 	}
 	c.JSON(http.StatusCreated, order)
@@ -339,13 +352,14 @@ func (s *Server) submitOrderHandler(c *gin.Context) {
 
 func (s *Server) adminOrdersHandler(c *gin.Context) {
 	status := c.Query("status")
-	if status != "" && status != "new" && status != "sold" && status != "cancelled" {
+	if status != "" && status != models.OrderStatusNew &&
+		status != models.OrderStatusSold && status != models.OrderStatusCancelled {
 		writeError(c, http.StatusBadRequest, "invalid_status", "status must be new, sold, or cancelled", nil)
 		return
 	}
 	orders, err := s.db.Orders(c.Request.Context(), status)
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "orders_unavailable", "orders could not be loaded", nil)
+		writeFailure(c, http.StatusInternalServerError, "orders_unavailable", "orders could not be loaded", err)
 		return
 	}
 	c.Header("Cache-Control", "no-store")
@@ -357,16 +371,20 @@ func (s *Server) updateOrderStatusHandler(c *gin.Context) {
 		Status  string `json:"status"`
 		StaffID int64  `json:"staff_id"`
 	}
-	if err := c.ShouldBindJSON(&request); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be valid JSON", nil)
+	if !bindJSON(c, &request, "request body must be valid JSON") {
 		return
 	}
-	if request.Status != "sold" && request.Status != "cancelled" {
+	if request.Status != models.OrderStatusSold && request.Status != models.OrderStatusCancelled {
 		writeError(c, http.StatusUnprocessableEntity, "invalid_status", "status must be sold or cancelled", nil)
 		return
 	}
 	if authenticatedStaffID, exists := c.Get("staff_id"); exists {
-		request.StaffID = authenticatedStaffID.(int64)
+		staffID, valid := authenticatedStaffID.(int64)
+		if !valid {
+			writeFailure(c, http.StatusInternalServerError, "invalid_auth_context", "the authenticated staff identity is invalid", errors.New("staff_id context value is not an int64"))
+			return
+		}
+		request.StaffID = staffID
 	}
 	if request.StaffID < 1 {
 		writeError(c, http.StatusUnprocessableEntity, "invalid_staff_id", "staff_id must identify the worker handling the order", nil)
@@ -388,7 +406,7 @@ func (s *Server) updateOrderStatusHandler(c *gin.Context) {
 		case errors.Is(err, database.ErrInactiveStaff):
 			writeError(c, http.StatusUnprocessableEntity, "invalid_staff", "staff member does not exist or is inactive", nil)
 		default:
-			writeError(c, http.StatusInternalServerError, "status_update_failed", "order status could not be updated", nil)
+			writeFailure(c, http.StatusInternalServerError, "status_update_failed", "order status could not be updated", err)
 		}
 		return
 	}
@@ -402,7 +420,7 @@ func (s *Server) menuQRHandler(c *gin.Context) {
 			writeError(c, http.StatusNotFound, "menu_qr_not_configured", "the menu QR code has not been provisioned", nil)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "menu_qr_unavailable", "the menu QR code could not be loaded", nil)
+		writeFailure(c, http.StatusInternalServerError, "menu_qr_unavailable", "the menu QR code could not be loaded", err)
 		return
 	}
 	c.JSON(http.StatusOK, link)
@@ -415,12 +433,12 @@ func (s *Server) menuQRImageHandler(c *gin.Context) {
 			writeError(c, http.StatusNotFound, "menu_qr_not_configured", "the menu QR code has not been provisioned", nil)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "menu_qr_unavailable", "the menu QR code could not be loaded", nil)
+		writeFailure(c, http.StatusInternalServerError, "menu_qr_unavailable", "the menu QR code could not be loaded", err)
 		return
 	}
 	image, err := s.dub.QRCode(c.Request.Context(), link.QRCode)
 	if err != nil {
-		writeError(c, http.StatusBadGateway, "dub_unavailable", "the QR image could not be loaded from Dub", nil)
+		writeFailure(c, http.StatusBadGateway, "dub_unavailable", "the QR image could not be loaded from Dub", err)
 		return
 	}
 	c.Header("Cache-Control", "public, max-age=86400")
@@ -447,28 +465,28 @@ func (s *Server) provisionMenuQRHandler(c *gin.Context) {
 	if existing, err := s.db.MenuQR(c.Request.Context()); err == nil {
 		current, retrieveErr := s.dub.RetrieveMenuLink(c.Request.Context(), existing.ID, s.config.DubDomain, s.config.DubLinkKey)
 		if retrieveErr != nil {
-			writeError(c, http.StatusBadGateway, "dub_link_failed", "Dub could not retrieve the existing menu link", nil)
+			writeFailure(c, http.StatusBadGateway, "dub_link_failed", "Dub could not retrieve the existing menu link", retrieveErr)
 			return
 		}
 		if err := s.db.SaveMenuQR(c.Request.Context(), current); err != nil {
-			writeError(c, http.StatusInternalServerError, "menu_qr_save_failed", "the current Dub link could not be saved", nil)
+			writeFailure(c, http.StatusInternalServerError, "menu_qr_save_failed", "the current Dub link could not be saved", err)
 			return
 		}
 		c.JSON(http.StatusOK, current)
 		return
 	} else if !errors.Is(err, database.ErrNotFound) {
-		writeError(c, http.StatusInternalServerError, "menu_qr_unavailable", "the menu QR configuration could not be loaded", nil)
+		writeFailure(c, http.StatusInternalServerError, "menu_qr_unavailable", "the menu QR configuration could not be loaded", err)
 		return
 	}
 	if current, err := s.dub.RetrieveMenuLink(c.Request.Context(), "", s.config.DubDomain, s.config.DubLinkKey); err == nil {
 		if err := s.db.SaveMenuQR(c.Request.Context(), current); err != nil {
-			writeError(c, http.StatusInternalServerError, "menu_qr_save_failed", "the existing Dub link could not be saved", nil)
+			writeFailure(c, http.StatusInternalServerError, "menu_qr_save_failed", "the existing Dub link could not be saved", err)
 			return
 		}
 		c.JSON(http.StatusOK, current)
 		return
 	} else if !errors.Is(err, dub.ErrNotFound) {
-		writeError(c, http.StatusBadGateway, "dub_link_failed", "Dub could not retrieve the menu link", nil)
+		writeFailure(c, http.StatusBadGateway, "dub_link_failed", "Dub could not retrieve the menu link", err)
 		return
 	}
 
@@ -476,11 +494,11 @@ func (s *Server) provisionMenuQRHandler(c *gin.Context) {
 		c.Request.Context(), s.config.MenuAppURL, s.config.DubDomain, s.config.DubLinkKey,
 	)
 	if err != nil {
-		writeError(c, http.StatusBadGateway, "dub_link_failed", "Dub could not create the menu link", nil)
+		writeFailure(c, http.StatusBadGateway, "dub_link_failed", "Dub could not create the menu link", err)
 		return
 	}
 	if err := s.db.SaveMenuQR(c.Request.Context(), link); err != nil {
-		writeError(c, http.StatusInternalServerError, "menu_qr_save_failed", "the Dub link was created but could not be saved", nil)
+		writeFailure(c, http.StatusInternalServerError, "menu_qr_save_failed", "the Dub link was created but could not be saved", err)
 		return
 	}
 	c.JSON(http.StatusCreated, link)
@@ -518,12 +536,19 @@ func (s *Server) updateInventoryHandler(c *gin.Context) {
 	var request struct {
 		StockQuantity *int `json:"stock_qty"`
 	}
-	if err := c.ShouldBindJSON(&request); err != nil || request.StockQuantity == nil {
+	if !bindJSON(c, &request, "request body must be valid JSON") {
+		return
+	}
+	if request.StockQuantity == nil {
 		writeError(c, http.StatusBadRequest, "invalid_request", "stock_qty is required", nil)
 		return
 	}
 	if *request.StockQuantity < 0 {
 		writeError(c, http.StatusUnprocessableEntity, "invalid_stock_qty", "stock_qty cannot be negative", nil)
+		return
+	}
+	if *request.StockQuantity > math.MaxInt32 {
+		writeError(c, http.StatusUnprocessableEntity, "invalid_stock_qty", "stock_qty cannot exceed 2147483647", nil)
 		return
 	}
 	itemID, ok := positivePathID(c, "item")
@@ -540,7 +565,7 @@ func (s *Server) updateInventoryHandler(c *gin.Context) {
 			writeError(c, http.StatusConflict, "stock_not_tracked", "this menu item does not track stock", nil)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "inventory_update_failed", "inventory could not be updated", nil)
+		writeFailure(c, http.StatusInternalServerError, "inventory_update_failed", "inventory could not be updated", err)
 		return
 	}
 	c.JSON(http.StatusOK, inventory)
@@ -550,12 +575,19 @@ func (s *Server) updateVariantInventoryHandler(c *gin.Context) {
 	var request struct {
 		StockQuantity *int `json:"stock_qty"`
 	}
-	if err := c.ShouldBindJSON(&request); err != nil || request.StockQuantity == nil {
+	if !bindJSON(c, &request, "request body must be valid JSON") {
+		return
+	}
+	if request.StockQuantity == nil {
 		writeError(c, http.StatusBadRequest, "invalid_request", "stock_qty is required", nil)
 		return
 	}
 	if *request.StockQuantity < 0 {
 		writeError(c, http.StatusUnprocessableEntity, "invalid_stock_qty", "stock_qty cannot be negative", nil)
+		return
+	}
+	if *request.StockQuantity > math.MaxInt32 {
+		writeError(c, http.StatusUnprocessableEntity, "invalid_stock_qty", "stock_qty cannot exceed 2147483647", nil)
 		return
 	}
 	variantID, ok := positivePathID(c, "variant")
@@ -572,7 +604,7 @@ func (s *Server) updateVariantInventoryHandler(c *gin.Context) {
 			writeError(c, http.StatusConflict, "stock_not_tracked", "this variant does not track stock", nil)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "inventory_update_failed", "variant inventory could not be updated", nil)
+		writeFailure(c, http.StatusInternalServerError, "inventory_update_failed", "variant inventory could not be updated", err)
 		return
 	}
 	c.JSON(http.StatusOK, inventory)
@@ -582,7 +614,10 @@ func (s *Server) updateItemAvailabilityHandler(c *gin.Context) {
 	var request struct {
 		Available *bool `json:"available"`
 	}
-	if err := c.ShouldBindJSON(&request); err != nil || request.Available == nil {
+	if !bindJSON(c, &request, "request body must be valid JSON") {
+		return
+	}
+	if request.Available == nil {
 		writeError(c, http.StatusBadRequest, "invalid_request", "available is required", nil)
 		return
 	}
@@ -596,7 +631,7 @@ func (s *Server) updateItemAvailabilityHandler(c *gin.Context) {
 			writeError(c, http.StatusNotFound, "item_not_found", "menu item was not found", nil)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "availability_update_failed", "item availability could not be updated", nil)
+		writeFailure(c, http.StatusInternalServerError, "availability_update_failed", "item availability could not be updated", err)
 		return
 	}
 	c.JSON(http.StatusOK, availability)
@@ -606,13 +641,16 @@ func (s *Server) updateItemImageHandler(c *gin.Context) {
 	var request struct {
 		ImageURL *string `json:"image_url"`
 	}
-	if err := c.ShouldBindJSON(&request); err != nil || request.ImageURL == nil {
+	if !bindJSON(c, &request, "request body must be valid JSON") {
+		return
+	}
+	if request.ImageURL == nil {
 		writeError(c, http.StatusBadRequest, "invalid_request", "image_url is required", nil)
 		return
 	}
 
 	imageURL := strings.TrimSpace(*request.ImageURL)
-	if len(imageURL) > 2048 || !menu.ValidImageURL(imageURL) {
+	if utf8.RuneCountInString(imageURL) > 2048 || !menu.ValidImageURL(imageURL) {
 		writeError(c, http.StatusUnprocessableEntity, "invalid_image_url", "image_url must be empty, an absolute HTTP(S) URL, or a root-relative path", nil)
 		return
 	}
@@ -627,7 +665,7 @@ func (s *Server) updateItemImageHandler(c *gin.Context) {
 			writeError(c, http.StatusNotFound, "item_not_found", "menu item was not found", nil)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "image_update_failed", "menu item image could not be updated", nil)
+		writeFailure(c, http.StatusInternalServerError, "image_update_failed", "menu item image could not be updated", err)
 		return
 	}
 	c.JSON(http.StatusOK, image)
@@ -635,8 +673,7 @@ func (s *Server) updateItemImageHandler(c *gin.Context) {
 
 func (s *Server) createMenuItemsHandler(c *gin.Context) {
 	var request []models.NewItem
-	if err := c.ShouldBindJSON(&request); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be a JSON array of menu items", nil)
+	if !bindJSON(c, &request, "request body must be a JSON array of menu items") {
 		return
 	}
 	items, err := menu.NormalizeAndValidateNewItems(request)
@@ -646,7 +683,7 @@ func (s *Server) createMenuItemsHandler(c *gin.Context) {
 			writeError(c, http.StatusUnprocessableEntity, "invalid_menu_items", err.Error(), validationErrors)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "menu_item_validation_failed", "menu items could not be validated", nil)
+		writeFailure(c, http.StatusInternalServerError, "menu_item_validation_failed", "menu items could not be validated", err)
 		return
 	}
 	created, err := s.db.CreateMenuItems(c.Request.Context(), items)
@@ -657,7 +694,7 @@ func (s *Server) createMenuItemsHandler(c *gin.Context) {
 		case errors.Is(err, database.ErrInvalidCategory):
 			writeError(c, http.StatusUnprocessableEntity, "invalid_category", "one or more category IDs do not exist", nil)
 		default:
-			writeError(c, http.StatusInternalServerError, "menu_item_create_failed", "menu items could not be created", nil)
+			writeFailure(c, http.StatusInternalServerError, "menu_item_create_failed", "menu items could not be created", err)
 		}
 		return
 	}
@@ -667,7 +704,7 @@ func (s *Server) createMenuItemsHandler(c *gin.Context) {
 func (s *Server) menuCategoriesHandler(c *gin.Context) {
 	categories, err := s.db.Categories(c.Request.Context())
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "categories_unavailable", "menu categories could not be loaded", nil)
+		writeFailure(c, http.StatusInternalServerError, "categories_unavailable", "menu categories could not be loaded", err)
 		return
 	}
 	c.Header("Cache-Control", "no-store")
@@ -676,8 +713,7 @@ func (s *Server) menuCategoriesHandler(c *gin.Context) {
 
 func (s *Server) createMenuCategoriesHandler(c *gin.Context) {
 	var request []models.NewCategory
-	if err := c.ShouldBindJSON(&request); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be a JSON array of categories", nil)
+	if !bindJSON(c, &request, "request body must be a JSON array of categories") {
 		return
 	}
 	categories, err := menu.NormalizeAndValidateNewCategories(request)
@@ -687,7 +723,7 @@ func (s *Server) createMenuCategoriesHandler(c *gin.Context) {
 			writeError(c, http.StatusUnprocessableEntity, "invalid_categories", err.Error(), validationErrors)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "category_validation_failed", "categories could not be validated", nil)
+		writeFailure(c, http.StatusInternalServerError, "category_validation_failed", "categories could not be validated", err)
 		return
 	}
 	created, err := s.db.CreateCategories(c.Request.Context(), categories)
@@ -696,7 +732,7 @@ func (s *Server) createMenuCategoriesHandler(c *gin.Context) {
 			writeError(c, http.StatusConflict, "category_conflict", "one or more category names already exist", nil)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "category_create_failed", "categories could not be created", nil)
+		writeFailure(c, http.StatusInternalServerError, "category_create_failed", "categories could not be created", err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"categories": created})
@@ -705,7 +741,7 @@ func (s *Server) createMenuCategoriesHandler(c *gin.Context) {
 func (s *Server) staffHandler(c *gin.Context) {
 	staff, err := s.db.Staff(c.Request.Context(), c.Query("include_inactive") == "true")
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "staff_unavailable", "staff could not be loaded", nil)
+		writeFailure(c, http.StatusInternalServerError, "staff_unavailable", "staff could not be loaded", err)
 		return
 	}
 	c.Header("Cache-Control", "no-store")
@@ -717,23 +753,23 @@ func (s *Server) createStaffHandler(c *gin.Context) {
 		Name string `json:"name"`
 		PIN  string `json:"pin"`
 	}
-	if err := c.ShouldBindJSON(&request); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be valid JSON", nil)
+	if !bindJSON(c, &request, "request body must be valid JSON") {
 		return
 	}
 	request.Name = strings.TrimSpace(request.Name)
 	request.PIN = strings.TrimSpace(request.PIN)
-	if request.Name == "" || len(request.Name) > 80 {
+	if request.Name == "" || utf8.RuneCountInString(request.Name) > 80 {
 		writeError(c, http.StatusUnprocessableEntity, "invalid_staff_name", "name is required and cannot exceed 80 characters", nil)
 		return
 	}
-	if len(request.PIN) < 4 || len(request.PIN) > 32 {
+	pinLength := utf8.RuneCountInString(request.PIN)
+	if pinLength < 4 || pinLength > 32 {
 		writeError(c, http.StatusUnprocessableEntity, "invalid_pin", "pin must contain between 4 and 32 characters", nil)
 		return
 	}
 	pinHash, err := hashPIN(request.PIN)
 	if err != nil {
-		writeError(c, http.StatusInternalServerError, "staff_create_failed", "staff member could not be created", nil)
+		writeFailure(c, http.StatusInternalServerError, "staff_create_failed", "staff member could not be created", err)
 		return
 	}
 	member, err := s.db.CreateStaff(c.Request.Context(), request.Name, pinHash)
@@ -742,7 +778,7 @@ func (s *Server) createStaffHandler(c *gin.Context) {
 			writeError(c, http.StatusConflict, "staff_conflict", "a staff member with that name already exists", nil)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "staff_create_failed", "staff member could not be created", nil)
+		writeFailure(c, http.StatusInternalServerError, "staff_create_failed", "staff member could not be created", err)
 		return
 	}
 	c.JSON(http.StatusCreated, member)
@@ -793,14 +829,25 @@ func (s *Server) staffLoginHandler(c *gin.Context) {
 		Name string `json:"name"`
 		PIN  string `json:"pin"`
 	}
-	if err := c.ShouldBindJSON(&request); err != nil {
-		writeError(c, http.StatusBadRequest, "invalid_request", "request body must be valid JSON", nil)
+	if !bindJSON(c, &request, "request body must be valid JSON") {
 		return
 	}
 	request.Name = strings.TrimSpace(request.Name)
 	request.PIN = strings.TrimSpace(request.PIN)
+	pinLength := utf8.RuneCountInString(request.PIN)
+	if request.Name == "" || utf8.RuneCountInString(request.Name) > 80 || pinLength < 4 || pinLength > 32 {
+		writeError(c, http.StatusUnauthorized, "invalid_staff_login", "staff name or PIN is invalid", nil)
+		return
+	}
 	member, pinHash, err := s.db.StaffCredentials(c.Request.Context(), request.Name)
-	if err != nil || !member.Active || !verifyPIN(request.PIN, pinHash) {
+	if err != nil && !errors.Is(err, database.ErrNotFound) {
+		reportError(c, err)
+	}
+	if err != nil {
+		pinHash = dummyPINHash
+	}
+	validPIN := verifyPIN(request.PIN, pinHash)
+	if err != nil || !member.Active || !validPIN {
 		writeError(c, http.StatusUnauthorized, "invalid_staff_login", "staff name or PIN is invalid", nil)
 		return
 	}
@@ -818,29 +865,29 @@ func (s *Server) signStaffToken(staffID int64, expiresAt time.Time) string {
 }
 
 func (s *Server) verifyStaffToken(token string) (int64, bool) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 2 {
+	payloadPart, signaturePart, found := strings.Cut(token, ".")
+	if !found || payloadPart == "" || signaturePart == "" || strings.Contains(signaturePart, ".") {
 		return 0, false
 	}
-	providedSignature, err := base64.RawURLEncoding.DecodeString(parts[1])
+	providedSignature, err := base64.RawURLEncoding.DecodeString(signaturePart)
 	if err != nil {
 		return 0, false
 	}
 	mac := hmac.New(sha256.New, []byte(s.config.AdminAPIKey))
-	_, _ = mac.Write([]byte(parts[0]))
+	_, _ = mac.Write([]byte(payloadPart))
 	if !hmac.Equal(providedSignature, mac.Sum(nil)) {
 		return 0, false
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
 	if err != nil {
 		return 0, false
 	}
-	values := strings.Split(string(payload), ":")
-	if len(values) != 2 {
+	staffIDValue, expiresValue, found := strings.Cut(string(payload), ":")
+	if !found || strings.Contains(expiresValue, ":") {
 		return 0, false
 	}
-	staffID, idErr := strconv.ParseInt(values[0], 10, 64)
-	expiresUnix, expiryErr := strconv.ParseInt(values[1], 10, 64)
+	staffID, idErr := strconv.ParseInt(staffIDValue, 10, 64)
+	expiresUnix, expiryErr := strconv.ParseInt(expiresValue, 10, 64)
 	if idErr != nil || expiryErr != nil || staffID < 1 || time.Now().Unix() >= expiresUnix {
 		return 0, false
 	}
@@ -851,7 +898,10 @@ func (s *Server) updateStaffActiveHandler(c *gin.Context) {
 	var request struct {
 		Active *bool `json:"active"`
 	}
-	if err := c.ShouldBindJSON(&request); err != nil || request.Active == nil {
+	if !bindJSON(c, &request, "request body must be valid JSON") {
+		return
+	}
+	if request.Active == nil {
 		writeError(c, http.StatusBadRequest, "invalid_request", "active is required", nil)
 		return
 	}
@@ -865,7 +915,7 @@ func (s *Server) updateStaffActiveHandler(c *gin.Context) {
 			writeError(c, http.StatusNotFound, "staff_not_found", "staff member was not found", nil)
 			return
 		}
-		writeError(c, http.StatusInternalServerError, "staff_update_failed", "staff member could not be updated", nil)
+		writeFailure(c, http.StatusInternalServerError, "staff_update_failed", "staff member could not be updated", err)
 		return
 	}
 	c.JSON(http.StatusOK, member)
@@ -894,7 +944,11 @@ func (s *Server) requireAdminKey() gin.HandlerFunc {
 			const bearerPrefix = "Bearer "
 			if authorization := c.GetHeader("Authorization"); strings.HasPrefix(authorization, bearerPrefix) {
 				if staffID, tokenValid := s.verifyStaffToken(strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix))); tokenValid {
-					if active, err := s.db.StaffActive(c.Request.Context(), staffID); err == nil && active {
+					active, err := s.db.StaffActive(c.Request.Context(), staffID)
+					if err != nil && !errors.Is(err, database.ErrNotFound) {
+						reportError(c, err)
+					}
+					if err == nil && active {
 						valid = true
 						c.Set("staff_id", staffID)
 					}
@@ -916,4 +970,22 @@ func writeError(c *gin.Context, status int, code, message string, details any) {
 		errorBody["details"] = details
 	}
 	c.JSON(status, gin.H{"error": errorBody})
+}
+
+func writeFailure(c *gin.Context, status int, code, message string, cause error) {
+	reportError(c, cause)
+	writeError(c, status, code, message, nil)
+}
+
+func bindJSON(c *gin.Context, destination any, invalidMessage string) bool {
+	if err := c.ShouldBindJSON(destination); err != nil {
+		var sizeError *http.MaxBytesError
+		if errors.As(err, &sizeError) {
+			writeError(c, http.StatusRequestEntityTooLarge, "request_too_large", "request body may not exceed 1 MiB", nil)
+			return false
+		}
+		writeError(c, http.StatusBadRequest, "invalid_request", invalidMessage, nil)
+		return false
+	}
+	return true
 }

@@ -31,7 +31,7 @@ func (f *fakeS3Client) GetObject(_ context.Context, input *s3.GetObjectInput, _ 
 
 func TestPutUsesConfiguredBucketAndMetadata(t *testing.T) {
 	client := &fakeS3Client{}
-	store := &service{client: client, bucket: "menu"}
+	store := &Store{client: client, bucket: "menu"}
 
 	if err := store.Put(context.Background(), "menu/cake.jpg", strings.NewReader("jpeg"), 4, "image/jpeg"); err != nil {
 		t.Fatal(err)
@@ -46,11 +46,15 @@ func TestPutUsesConfiguredBucketAndMetadata(t *testing.T) {
 
 func TestGetMapsMissingObject(t *testing.T) {
 	client := &fakeS3Client{getErr: &smithy.GenericAPIError{Code: "NoSuchKey", Message: "missing"}}
-	store := &service{client: client, bucket: "menu"}
+	store := &Store{client: client, bucket: "menu"}
 
 	_, err := store.Get(context.Background(), "menu/missing.jpg")
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+	var apiError smithy.APIError
+	if !errors.As(err, &apiError) {
+		t.Fatalf("expected the storage API error to remain unwrap-able, got %v", err)
 	}
 }
 
@@ -61,15 +65,34 @@ func TestGetReturnsObjectMetadata(t *testing.T) {
 		ContentLength: aws.Int64(4),
 		ETag:          aws.String("\"etag\""),
 	}}
-	store := &service{client: client, bucket: "menu"}
+	store := &Store{client: client, bucket: "menu"}
 
 	object, err := store.Get(context.Background(), "menu/cake.jpg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer object.Body.Close()
+	t.Cleanup(func() {
+		if err := object.Body.Close(); err != nil {
+			t.Errorf("close object body: %v", err)
+		}
+	})
 	if object.ContentType != "image/jpeg" || object.ContentLength != 4 || object.ETag != "etag" {
 		t.Fatalf("unexpected object: %+v", object)
+	}
+}
+
+func TestStoreRejectsInvalidInputsBeforeCallingClient(t *testing.T) {
+	client := &fakeS3Client{}
+	store := &Store{client: client, bucket: "menu"}
+
+	if err := store.Put(context.Background(), "", strings.NewReader("data"), 4, "image/webp"); err == nil {
+		t.Fatal("expected an empty key to be rejected")
+	}
+	if _, err := store.Get(context.Background(), ""); err == nil {
+		t.Fatal("expected an empty key to be rejected")
+	}
+	if client.putInput != nil || client.getInput != nil {
+		t.Fatal("invalid input reached the storage client")
 	}
 }
 

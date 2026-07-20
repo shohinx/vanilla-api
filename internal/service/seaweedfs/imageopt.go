@@ -36,9 +36,12 @@ type Result struct {
 // Optimize validates, auto-orients, downsizes, and converts one still image
 // to WebP. Re-encoding without metadata strips EXIF, ICC, and XMP payloads.
 func Optimize(source io.ReadSeeker) (Result, error) {
+	if source == nil {
+		return Result{}, fmt.Errorf("%w: source is required", ErrInvalidImage)
+	}
 	config, format, err := image.DecodeConfig(source)
 	if err != nil {
-		return Result{}, fmt.Errorf("%w: decode configuration: %v", ErrInvalidImage, err)
+		return Result{}, fmt.Errorf("%w: decode configuration: %w", ErrInvalidImage, err)
 	}
 	if format != "jpeg" && format != "png" && format != "webp" {
 		return Result{}, fmt.Errorf("%w: unsupported format %q", ErrInvalidImage, format)
@@ -46,16 +49,16 @@ func Optimize(source io.ReadSeeker) (Result, error) {
 	if config.Width <= 0 || config.Height <= 0 {
 		return Result{}, fmt.Errorf("%w: invalid dimensions", ErrInvalidImage)
 	}
-	if int64(config.Width)*int64(config.Height) > MaxSourcePixels {
+	if int64(config.Width) > int64(MaxSourcePixels)/int64(config.Height) {
 		return Result{}, ErrTooManyPixels
 	}
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
-		return Result{}, fmt.Errorf("%w: rewind source: %v", ErrInvalidImage, err)
+		return Result{}, fmt.Errorf("%w: rewind source: %w", ErrInvalidImage, err)
 	}
 
 	decoded, err := imaging.Decode(source, imaging.AutoOrientation(true))
 	if err != nil {
-		return Result{}, fmt.Errorf("%w: decode pixels: %v", ErrInvalidImage, err)
+		return Result{}, fmt.Errorf("%w: decode pixels: %w", ErrInvalidImage, err)
 	}
 	options := webp.DefaultOptions()
 	options.Quality = WebPQuality

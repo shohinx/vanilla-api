@@ -23,6 +23,7 @@ import (
 
 type fakeDatabase struct {
 	menu               models.Menu
+	menuErr            error
 	includeUnavailable bool
 	inventory          models.Inventory
 	updateItemID       int64
@@ -48,12 +49,12 @@ type fakeDatabase struct {
 
 func (f *fakeDatabase) Initialize(context.Context) error { return nil }
 func (f *fakeDatabase) Close() error                     { return nil }
-func (f *fakeDatabase) Health(context.Context) map[string]string {
-	return map[string]string{"status": "up"}
+func (f *fakeDatabase) Health(context.Context) (map[string]string, error) {
+	return map[string]string{"status": "up"}, nil
 }
 func (f *fakeDatabase) Menu(_ context.Context, includeUnavailable bool) (models.Menu, error) {
 	f.includeUnavailable = includeUnavailable
-	return f.menu, nil
+	return f.menu, f.menuErr
 }
 
 func (f *fakeDatabase) Categories(context.Context) ([]models.MenuCategory, error) {
@@ -254,7 +255,7 @@ func newTestRouterWithDub(db *fakeDatabase, dubService *fakeDub) http.Handler {
 	}).RegisterRoutes()
 }
 
-func newTestRouterWithImages(db *fakeDatabase, imageService seaweedfs.Service) http.Handler {
+func newTestRouterWithImages(db *fakeDatabase, imageService ImageStore) http.Handler {
 	return New(db, &fakeDub{}, imageService, Config{
 		AdminAPIKey:    "test-secret",
 		MenuAppURL:     "https://models.example.com",

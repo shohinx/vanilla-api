@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -12,49 +14,51 @@ import (
 	"github.com/shohinx/vanilla-api/internal/server"
 )
 
-func gracefulShutdown(apiServer *http.Server, done chan bool) {
-	// Create context that listens for the interrupt signal from the OS.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	// Listen for the interrupt signal.
-	<-ctx.Done()
-
-	log.Println("shutting down gracefully, press Ctrl+C again to force")
-	stop() // Allow Ctrl+C to force shutdown
-
-	// The context is used to inform the server it has 5 seconds to finish
-	// the request it is currently handling
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := apiServer.Shutdown(ctx); err != nil {
-		log.Printf("Server forced to shutdown with error: %v", err)
-	}
-
-	log.Println("Server exiting")
-
-	// Notify the main goroutine that the shutdown is complete
-	done <- true
-}
+const shutdownTimeout = 5 * time.Second
 
 func main() {
-	apiServer, err := server.NewServer()
+	if err := run(); err != nil {
+		slog.Error("API stopped", slog.Any("error", err))
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	application, err := server.NewServer()
 	if err != nil {
-		log.Fatalf("initialize server: %v", err)
+		return fmt.Errorf("initialize server: %w", err)
+	}
+	defer func() {
+		if err := application.Close(); err != nil {
+			slog.Error("close application", slog.Any("error", err))
+		}
+	}()
+
+	signalContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
+	serveErrors := make(chan error, 1)
+	go func() {
+		serveErrors <- application.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveErrors:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve HTTP: %w", err)
+	case <-signalContext.Done():
+		slog.Info("shutting down gracefully; send another signal to force exit")
+		stopSignals()
 	}
 
-	// Create a done channel to signal when the shutdown is complete
-	done := make(chan bool, 1)
-
-	// Run graceful shutdown in a separate goroutine
-	go gracefulShutdown(apiServer, done)
-
-	err = apiServer.ListenAndServe()
-	if err != nil && err != http.ErrServerClosed {
-		panic(fmt.Sprintf("http server error: %s", err))
+	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	shutdownErr := application.Shutdown(shutdownContext)
+	serveErr := <-serveErrors
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
 	}
-
-	// Wait for the graceful shutdown to complete
-	<-done
-	log.Println("Graceful shutdown complete.")
+	return errors.Join(shutdownErr, serveErr)
 }

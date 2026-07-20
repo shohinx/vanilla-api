@@ -3,6 +3,7 @@ package seaweedfs
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"image"
 	"image/color"
@@ -61,21 +62,29 @@ func TestOptimizeRejectsMalformedImage(t *testing.T) {
 	}
 }
 
+func TestOptimizeRejectsNilSource(t *testing.T) {
+	_, err := Optimize(nil)
+	if !errors.Is(err, ErrInvalidImage) {
+		t.Fatalf("expected ErrInvalidImage, got %v", err)
+	}
+}
+
 func pngHeader(width, height uint32) []byte {
-	var output bytes.Buffer
-	output.Write([]byte("\x89PNG\r\n\x1a\n"))
+	output := []byte("\x89PNG\r\n\x1a\n")
 	data := make([]byte, 13)
 	binary.BigEndian.PutUint32(data[0:4], width)
 	binary.BigEndian.PutUint32(data[4:8], height)
 	data[8] = 8
 	data[9] = 2
 
-	binary.Write(&output, binary.BigEndian, uint32(len(data)))
-	output.WriteString("IHDR")
-	output.Write(data)
+	var encodedInteger [4]byte
+	binary.BigEndian.PutUint32(encodedInteger[:], uint32(len(data)))
+	output = append(output, encodedInteger[:]...)
+	output = append(output, "IHDR"...)
+	output = append(output, data...)
 	checksum := crc32.NewIEEE()
-	checksum.Write([]byte("IHDR"))
-	checksum.Write(data)
-	binary.Write(&output, binary.BigEndian, checksum.Sum32())
-	return output.Bytes()
+	_, _ = checksum.Write([]byte("IHDR"))
+	_, _ = checksum.Write(data)
+	binary.BigEndian.PutUint32(encodedInteger[:], checksum.Sum32())
+	return append(output, encodedInteger[:]...)
 }

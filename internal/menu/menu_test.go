@@ -1,6 +1,7 @@
 package menu
 
 import (
+	"math"
 	"testing"
 
 	"github.com/shohinx/vanilla-api/internal/sdk/models"
@@ -106,6 +107,41 @@ func TestNormalizeAndValidateNewItemsTrimsOptionalImageURL(t *testing.T) {
 	}
 	if items[0].ImageURL == nil || *items[0].ImageURL != "/api/v1/images/menu/cookie.webp" {
 		t.Fatalf("image URL was not normalized: %+v", items[0].ImageURL)
+	}
+}
+
+func TestNormalizeAndValidateNewItemsDoesNotMutateInput(t *testing.T) {
+	imageURL := " /images/cookie.webp "
+	items := []models.NewItem{{
+		CategoryID: 1,
+		Name:       " Cookie ",
+		ImageURL:   &imageURL,
+		VariantGroup: &models.NewVariantGroup{
+			Name:    " Size ",
+			Options: []models.NewVariantOption{{Name: " Small "}},
+		},
+	}}
+
+	normalized, err := NormalizeAndValidateNewItems(items)
+	if err != nil {
+		t.Fatalf("NormalizeAndValidateNewItems() returned an error: %v", err)
+	}
+	if items[0].Name != " Cookie " || *items[0].ImageURL != " /images/cookie.webp " ||
+		items[0].VariantGroup.Name != " Size " || items[0].VariantGroup.Options[0].Name != " Small " {
+		t.Fatalf("input was mutated: %+v", items[0])
+	}
+	if normalized[0].Name != "Cookie" || normalized[0].VariantGroup.Options[0].Name != "Small" {
+		t.Fatalf("normalized copy is incorrect: %+v", normalized[0])
+	}
+}
+
+func TestBuildQuoteRejectsIntegerOverflow(t *testing.T) {
+	current := models.Menu{Categories: []models.Category{{Items: []models.Item{{
+		ID: 1, Name: "Very Expensive Cake", PriceCents: math.MaxInt, Available: true,
+	}}}}}
+	_, err := BuildQuote(current, models.QuoteRequest{Items: []models.QuoteItemRequest{{ItemID: 1, Quantity: 2}}})
+	if err == nil {
+		t.Fatal("expected an overflowing line total to be rejected")
 	}
 }
 

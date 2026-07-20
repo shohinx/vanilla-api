@@ -1,10 +1,33 @@
 package models
 
-import "time"
+import (
+	"iter"
+	"time"
+)
+
+const (
+	OrderStatusNew       = "new"
+	OrderStatusSold      = "sold"
+	OrderStatusCancelled = "cancelled"
+)
 
 type Menu struct {
 	GeneratedAt time.Time  `json:"generated_at"`
 	Categories  []Category `json:"categories"`
+}
+
+// Items returns every menu item in category order without allocating an
+// intermediate slice.
+func (m Menu) Items() iter.Seq[Item] {
+	return func(yield func(Item) bool) {
+		for _, category := range m.Categories {
+			for _, item := range category.Items {
+				if !yield(item) {
+					return
+				}
+			}
+		}
+	}
 }
 
 type Category struct {

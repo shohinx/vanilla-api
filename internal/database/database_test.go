@@ -64,10 +64,13 @@ func requirePostgres(t *testing.T) {
 	}
 }
 
-func initializedService(t *testing.T) Service {
+func initializedService(t *testing.T) *Store {
 	t.Helper()
 	requirePostgres(t)
-	srv := New()
+	srv, err := New()
+	if err != nil {
+		t.Fatalf("New() returned an error: %v", err)
+	}
 	t.Cleanup(func() { _ = srv.Close() })
 	if err := srv.Initialize(context.Background()); err != nil {
 		t.Fatalf("Initialize() returned an error: %v", err)
@@ -76,8 +79,19 @@ func initializedService(t *testing.T) Service {
 }
 
 func TestNew(t *testing.T) {
-	if New() == nil {
+	srv, err := New()
+	if err != nil {
+		t.Fatalf("New() returned an error: %v", err)
+	}
+	if srv == nil {
 		t.Fatal("New() returned nil")
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+}
+
+func TestOpenRejectsEmptyConnectionURL(t *testing.T) {
+	if _, err := Open("  "); err == nil {
+		t.Fatal("expected an empty connection URL to be rejected")
 	}
 }
 
@@ -85,7 +99,11 @@ func TestDatabaseConnectionURLUsesURI(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgresql://uri-user:uri-password@db.example.com:6543/uri_db")
 	t.Setenv("BLUEPRINT_DB_SSLMODE", "require")
 	t.Setenv("BLUEPRINT_DB_SCHEMA", "bakery")
-	connection, err := url.Parse(databaseConnectionURL())
+	connectionURL, err := databaseConnectionURL()
+	if err != nil {
+		t.Fatalf("databaseConnectionURL() returned an error: %v", err)
+	}
+	connection, err := url.Parse(connectionURL)
 	if err != nil {
 		t.Fatalf("parse database connection URL: %v", err)
 	}
@@ -104,7 +122,11 @@ func TestDatabaseConnectionURLPreservesURIOptions(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://user:password@localhost:5432/database?sslmode=verify-full&search_path=custom")
 	t.Setenv("BLUEPRINT_DB_SSLMODE", "disable")
 	t.Setenv("BLUEPRINT_DB_SCHEMA", "public")
-	connection, err := url.Parse(databaseConnectionURL())
+	connectionURL, err := databaseConnectionURL()
+	if err != nil {
+		t.Fatalf("databaseConnectionURL() returned an error: %v", err)
+	}
+	connection, err := url.Parse(connectionURL)
 	if err != nil {
 		t.Fatalf("parse database connection URL: %v", err)
 	}
@@ -113,9 +135,27 @@ func TestDatabaseConnectionURLPreservesURIOptions(t *testing.T) {
 	}
 }
 
+func TestDatabaseConnectionURLRejectsInvalidConfiguration(t *testing.T) {
+	for name, connectionURL := range map[string]string{
+		"invalid scheme":   "mysql://user:password@localhost/database",
+		"missing database": "postgres://user:password@localhost",
+		"malformed URL":    "postgres://%gh&%ij",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", connectionURL)
+			if _, err := databaseConnectionURL(); err == nil {
+				t.Fatalf("expected DATABASE_URL %q to be rejected", connectionURL)
+			}
+		})
+	}
+}
+
 func TestHealth(t *testing.T) {
 	srv := initializedService(t)
-	stats := srv.Health(context.Background())
+	stats, err := srv.Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health() returned an error: %v", err)
+	}
 	if stats["status"] != "up" || stats["message"] != "database is healthy" {
 		t.Fatalf("unexpected health response: %+v", stats)
 	}
@@ -141,7 +181,7 @@ func TestSeededMenuUsesSimpleVariantsAndOptionalStock(t *testing.T) {
 }
 
 func TestInitializeRemovesDiscardedPrototypeTables(t *testing.T) {
-	srv := initializedService(t).(*service)
+	srv := initializedService(t)
 	if _, err := srv.db.ExecContext(context.Background(), `CREATE TABLE categories (id TEXT PRIMARY KEY)`); err != nil {
 		t.Fatalf("create prototype table: %v", err)
 	}
@@ -273,7 +313,10 @@ func itemByName(t *testing.T, current models.Menu, name string) models.Item {
 }
 
 func TestClose(t *testing.T) {
-	srv := New()
+	srv, err := New()
+	if err != nil {
+		t.Fatalf("New() returned an error: %v", err)
+	}
 	if srv.Close() != nil {
 		t.Fatal("expected Close() to return nil")
 	}

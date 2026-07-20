@@ -2,98 +2,187 @@ package menu
 
 import (
 	"fmt"
+	"math"
 	"net/url"
+	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/shohinx/vanilla-api/internal/sdk/models"
 )
 
+const (
+	maxItemsPerRequest      = 100
+	maxCategoriesPerRequest = 50
+	maxItemNameLength       = 120
+	maxCategoryNameLength   = 80
+	maxVariantNameLength    = 80
+	maxDescriptionLength    = 1_000
+	maxImageURLLength       = 2_048
+	maxDatabaseInteger      = math.MaxInt32
+)
+
+// NormalizeAndValidateNewItems returns a normalized copy of items. The input
+// remains untouched, which lets callers safely retain or retry request values.
 func NormalizeAndValidateNewItems(items []models.NewItem) ([]models.NewItem, error) {
 	if len(items) == 0 {
 		return nil, models.ValidationErrors{{Field: "items", Message: "must contain at least one item"}}
 	}
-	if len(items) > 100 {
+	if len(items) > maxItemsPerRequest {
 		return nil, models.ValidationErrors{{Field: "items", Message: "cannot contain more than 100 items"}}
 	}
 
+	normalized := cloneNewItems(items)
+	seenItems := make(map[string]struct{}, len(normalized))
 	var validationErrors models.ValidationErrors
-	for itemIndex := range items {
-		item := &items[itemIndex]
-		field := fmt.Sprintf("items[%d]", itemIndex)
-		item.Name = strings.TrimSpace(item.Name)
-		item.Description = strings.TrimSpace(item.Description)
-		if item.ImageURL != nil {
-			imageURL := strings.TrimSpace(*item.ImageURL)
-			item.ImageURL = &imageURL
-			if len(imageURL) > 2048 || !ValidImageURL(imageURL) {
-				validationErrors = append(validationErrors, models.ValidationError{
-					Field: field + ".image_url", Message: "must be empty, an absolute HTTP(S) URL, or a root-relative path",
-				})
-			}
-		}
-		if item.CategoryID < 1 {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".category_id", Message: "must be a positive category ID"})
-		}
-		if item.Name == "" || len(item.Name) > 120 {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".name", Message: "is required and cannot exceed 120 characters"})
-		}
-		if len(item.Description) > 1000 {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".description", Message: "cannot exceed 1000 characters"})
-		}
-		if item.PriceCents < 0 {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".price_cents", Message: "cannot be negative"})
-		}
-		validateStock(field, item.TrackStock, item.StockQuantity, &validationErrors)
 
+	for itemIndex := range normalized {
+		item := &normalized[itemIndex]
+		field := fmt.Sprintf("items[%d]", itemIndex)
+		normalizeNewItem(item)
+
+		validateItem(item, field, &validationErrors)
+		itemKey := fmt.Sprintf("%d:%s", item.CategoryID, strings.ToLower(item.Name))
+		if _, exists := seenItems[itemKey]; exists && item.Name != "" {
+			validationErrors = append(validationErrors, models.ValidationError{
+				Field: field + ".name", Message: "must be unique within its category and request",
+			})
+		}
+		seenItems[itemKey] = struct{}{}
+
+		if item.VariantGroup != nil {
+			validateVariantGroup(item.VariantGroup, field+".variant_group", &validationErrors)
+		}
+	}
+
+	if len(validationErrors) != 0 {
+		return nil, validationErrors
+	}
+	return normalized, nil
+}
+
+func cloneNewItems(items []models.NewItem) []models.NewItem {
+	cloned := slices.Clone(items)
+	for index := range cloned {
+		item := &cloned[index]
+		item.ImageURL = clonePointer(item.ImageURL)
+		item.StockQuantity = clonePointer(item.StockQuantity)
+		item.Available = clonePointer(item.Available)
 		if item.VariantGroup == nil {
 			continue
 		}
-		group := item.VariantGroup
-		group.Name = strings.TrimSpace(group.Name)
-		if group.Name == "" || len(group.Name) > 80 {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".variant_group.name", Message: "is required and cannot exceed 80 characters"})
-		}
-		if group.Required == nil {
-			required := true
-			group.Required = &required
-		}
-		if !*group.Required {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".variant_group.required", Message: "must be true; optional add-ons are not part of this menu model"})
-		}
-		if len(group.Options) == 0 {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".variant_group.options", Message: "must contain at least one option"})
-		}
+
+		group := *item.VariantGroup
+		group.Required = clonePointer(group.Required)
+		group.Options = slices.Clone(group.Options)
 		for optionIndex := range group.Options {
 			option := &group.Options[optionIndex]
-			optionField := fmt.Sprintf("%s.variant_group.options[%d]", field, optionIndex)
-			option.Name = strings.TrimSpace(option.Name)
-			if option.Name == "" || len(option.Name) > 80 {
-				validationErrors = append(validationErrors, models.ValidationError{Field: optionField + ".name", Message: "is required and cannot exceed 80 characters"})
-			}
-			if option.PriceCents < 0 {
-				validationErrors = append(validationErrors, models.ValidationError{Field: optionField + ".price_cents", Message: "cannot be negative"})
-			}
-			validateStock(optionField, option.TrackStock, option.StockQuantity, &validationErrors)
+			option.StockQuantity = clonePointer(option.StockQuantity)
 		}
+		item.VariantGroup = &group
 	}
-	if len(validationErrors) > 0 {
-		return nil, validationErrors
+	return cloned
+}
+
+func clonePointer[T any](value *T) *T {
+	if value == nil {
+		return nil
 	}
-	return items, nil
+	cloned := *value
+	return &cloned
+}
+
+func normalizeNewItem(item *models.NewItem) {
+	item.Name = strings.TrimSpace(item.Name)
+	item.Description = strings.TrimSpace(item.Description)
+	if item.ImageURL != nil {
+		*item.ImageURL = strings.TrimSpace(*item.ImageURL)
+	}
+	if item.VariantGroup == nil {
+		return
+	}
+
+	group := item.VariantGroup
+	group.Name = strings.TrimSpace(group.Name)
+	if group.Required == nil {
+		group.Required = new(true)
+	}
+	for index := range group.Options {
+		group.Options[index].Name = strings.TrimSpace(group.Options[index].Name)
+	}
+}
+
+func validateItem(item *models.NewItem, field string, validationErrors *models.ValidationErrors) {
+	if item.CategoryID < 1 {
+		addValidationError(validationErrors, field+".category_id", "must be a positive category ID")
+	}
+	if emptyOrTooLong(item.Name, maxItemNameLength) {
+		addValidationError(validationErrors, field+".name", "is required and cannot exceed 120 characters")
+	}
+	if utf8.RuneCountInString(item.Description) > maxDescriptionLength {
+		addValidationError(validationErrors, field+".description", "cannot exceed 1000 characters")
+	}
+	if item.PriceCents < 0 || item.PriceCents > maxDatabaseInteger {
+		addValidationError(validationErrors, field+".price_cents", "must be between 0 and 2147483647")
+	}
+	if item.SortOrder < math.MinInt32 || item.SortOrder > maxDatabaseInteger {
+		addValidationError(validationErrors, field+".sort_order", "must fit in a 32-bit integer")
+	}
+	if item.ImageURL != nil && (utf8.RuneCountInString(*item.ImageURL) > maxImageURLLength || !ValidImageURL(*item.ImageURL)) {
+		addValidationError(validationErrors, field+".image_url", "must be empty, an absolute HTTP(S) URL, or a root-relative path")
+	}
+	validateStock(field, item.TrackStock, item.StockQuantity, validationErrors)
+}
+
+func validateVariantGroup(group *models.NewVariantGroup, field string, validationErrors *models.ValidationErrors) {
+	if emptyOrTooLong(group.Name, maxVariantNameLength) {
+		addValidationError(validationErrors, field+".name", "is required and cannot exceed 80 characters")
+	}
+	if !*group.Required {
+		addValidationError(validationErrors, field+".required", "must be true; optional add-ons are not part of this menu model")
+	}
+	if len(group.Options) == 0 {
+		addValidationError(validationErrors, field+".options", "must contain at least one option")
+	}
+
+	seenOptions := make(map[string]struct{}, len(group.Options))
+	for optionIndex := range group.Options {
+		option := &group.Options[optionIndex]
+		optionField := fmt.Sprintf("%s.options[%d]", field, optionIndex)
+		if emptyOrTooLong(option.Name, maxVariantNameLength) {
+			addValidationError(validationErrors, optionField+".name", "is required and cannot exceed 80 characters")
+		}
+		key := strings.ToLower(option.Name)
+		if _, exists := seenOptions[key]; exists && option.Name != "" {
+			addValidationError(validationErrors, optionField+".name", "must be unique within the variant group")
+		}
+		seenOptions[key] = struct{}{}
+		if option.PriceCents < 0 || option.PriceCents > maxDatabaseInteger {
+			addValidationError(validationErrors, optionField+".price_cents", "must be between 0 and 2147483647")
+		}
+		validateStock(optionField, option.TrackStock, option.StockQuantity, validationErrors)
+	}
 }
 
 func validateStock(field string, trackStock bool, stockQuantity *int, validationErrors *models.ValidationErrors) {
-	if trackStock && stockQuantity == nil {
-		*validationErrors = append(*validationErrors, models.ValidationError{Field: field + ".stock_qty", Message: "is required when track_stock is true"})
-		return
+	switch {
+	case trackStock && stockQuantity == nil:
+		addValidationError(validationErrors, field+".stock_qty", "is required when track_stock is true")
+	case !trackStock && stockQuantity != nil:
+		addValidationError(validationErrors, field+".stock_qty", "must be omitted when track_stock is false")
+	case stockQuantity != nil && *stockQuantity < 0:
+		addValidationError(validationErrors, field+".stock_qty", "cannot be negative")
+	case stockQuantity != nil && *stockQuantity > maxDatabaseInteger:
+		addValidationError(validationErrors, field+".stock_qty", "cannot exceed 2147483647")
 	}
-	if !trackStock && stockQuantity != nil {
-		*validationErrors = append(*validationErrors, models.ValidationError{Field: field + ".stock_qty", Message: "must be omitted when track_stock is false"})
-		return
-	}
-	if stockQuantity != nil && *stockQuantity < 0 {
-		*validationErrors = append(*validationErrors, models.ValidationError{Field: field + ".stock_qty", Message: "cannot be negative"})
-	}
+}
+
+func emptyOrTooLong(value string, maximum int) bool {
+	return value == "" || utf8.RuneCountInString(value) > maximum
+}
+
+func addValidationError(validationErrors *models.ValidationErrors, field, message string) {
+	*validationErrors = append(*validationErrors, models.ValidationError{Field: field, Message: message})
 }
 
 func ValidImageURL(value string) bool {
@@ -110,31 +199,38 @@ func ValidImageURL(value string) bool {
 	return strings.HasPrefix(parsed.Path, "/") && !strings.HasPrefix(value, "//")
 }
 
+// NormalizeAndValidateNewCategories returns a normalized copy of categories.
 func NormalizeAndValidateNewCategories(categories []models.NewCategory) ([]models.NewCategory, error) {
 	if len(categories) == 0 {
 		return nil, models.ValidationErrors{{Field: "categories", Message: "must contain at least one category"}}
 	}
-	if len(categories) > 50 {
+	if len(categories) > maxCategoriesPerRequest {
 		return nil, models.ValidationErrors{{Field: "categories", Message: "cannot contain more than 50 categories"}}
 	}
-	seen := make(map[string]bool, len(categories))
+
+	normalized := slices.Clone(categories)
+	seen := make(map[string]struct{}, len(normalized))
 	var validationErrors models.ValidationErrors
-	for index := range categories {
-		category := &categories[index]
+	for index := range normalized {
+		category := &normalized[index]
 		field := fmt.Sprintf("categories[%d]", index)
 		category.Name = strings.TrimSpace(category.Name)
 		key := strings.ToLower(category.Name)
-		if category.Name == "" || len(category.Name) > 80 {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".name", Message: "is required and cannot exceed 80 characters"})
-		} else if seen[key] {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".name", Message: "must be unique within the request"})
+
+		if emptyOrTooLong(category.Name, maxCategoryNameLength) {
+			addValidationError(&validationErrors, field+".name", "is required and cannot exceed 80 characters")
+		} else if _, exists := seen[key]; exists {
+			addValidationError(&validationErrors, field+".name", "must be unique within the request")
 		}
-		seen[key] = true
+		seen[key] = struct{}{}
+		if category.SortOrder < math.MinInt32 || category.SortOrder > maxDatabaseInteger {
+			addValidationError(&validationErrors, field+".sort_order", "must fit in a 32-bit integer")
+		}
 	}
-	if len(validationErrors) > 0 {
+	if len(validationErrors) != 0 {
 		return nil, validationErrors
 	}
-	return categories, nil
+	return normalized, nil
 }
 
 func BuildQuote(current models.Menu, request models.QuoteRequest) (models.Quote, error) {
@@ -143,85 +239,122 @@ func BuildQuote(current models.Menu, request models.QuoteRequest) (models.Quote,
 	}
 
 	items := make(map[int64]models.Item)
-	for _, category := range current.Categories {
-		for _, item := range category.Items {
-			items[item.ID] = item
-		}
+	for item := range current.Items() {
+		items[item.ID] = item
 	}
 
 	itemTotals := make(map[int64]int)
 	variantTotals := make(map[int64]int)
 	quote := models.Quote{Items: make([]models.QuoteLineItem, 0, len(request.Items))}
 	var validationErrors models.ValidationErrors
+
 	for index, requested := range request.Items {
 		field := fmt.Sprintf("items[%d]", index)
-		item, found := items[requested.ItemID]
-		if !found {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".item_id", Message: "item does not exist"})
+		item, exists := items[requested.ItemID]
+		if !exists {
+			addValidationError(&validationErrors, field+".item_id", "item does not exist")
 			continue
 		}
 		if requested.Quantity < 1 {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".quantity", Message: "must be at least 1"})
+			addValidationError(&validationErrors, field+".quantity", "must be at least 1")
 			continue
 		}
 		if !item.Available {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".item_id", Message: "item is not available"})
+			addValidationError(&validationErrors, field+".item_id", "item is not available")
 			continue
 		}
 
-		unitPrice := item.PriceCents
-		var selected *models.SelectedVariantOption
-		var selectedOption *models.VariantOption
-		if len(item.VariantGroups) > 0 {
-			if requested.VariantOptionID == nil {
-				validationErrors = append(validationErrors, models.ValidationError{Field: field + ".variant_option_id", Message: "is required for this item"})
-				continue
-			}
-			for optionIndex := range item.VariantGroups[0].Options {
-				option := &item.VariantGroups[0].Options[optionIndex]
-				if option.ID == *requested.VariantOptionID {
-					selectedOption = option
-					break
-				}
-			}
-			if selectedOption == nil {
-				validationErrors = append(validationErrors, models.ValidationError{Field: field + ".variant_option_id", Message: "does not belong to this item"})
-				continue
-			}
-			if !selectedOption.Available {
-				validationErrors = append(validationErrors, models.ValidationError{Field: field + ".variant_option_id", Message: "variant is not available"})
-				continue
-			}
-			unitPrice = selectedOption.PriceCents
-			selected = &models.SelectedVariantOption{ID: selectedOption.ID, Name: selectedOption.Name}
-		} else if requested.VariantOptionID != nil {
-			validationErrors = append(validationErrors, models.ValidationError{Field: field + ".variant_option_id", Message: "item does not have variants"})
+		line, selectedOption, validationError := quoteLine(item, requested, field)
+		if validationError != nil {
+			validationErrors = append(validationErrors, *validationError)
+			continue
+		}
+		if line.UnitPriceCents > math.MaxInt/requested.Quantity {
+			addValidationError(&validationErrors, field+".quantity", "quantity produces a total that is too large")
 			continue
 		}
 
-		if selectedOption != nil && selectedOption.TrackStock {
-			variantTotals[selectedOption.ID] += requested.Quantity
-			if selectedOption.StockQuantity == nil || variantTotals[selectedOption.ID] > *selectedOption.StockQuantity {
-				validationErrors = append(validationErrors, models.ValidationError{Field: field + ".quantity", Message: "requested variant quantity is not available"})
-				continue
-			}
-		} else if item.TrackStock {
-			itemTotals[item.ID] += requested.Quantity
-			if item.StockQuantity == nil || itemTotals[item.ID] > *item.StockQuantity {
-				validationErrors = append(validationErrors, models.ValidationError{Field: field + ".quantity", Message: "requested quantity is not available"})
-				continue
-			}
+		line.LineTotalCents = line.UnitPriceCents * line.Quantity
+		if quote.TotalCents > math.MaxInt-line.LineTotalCents {
+			addValidationError(&validationErrors, field+".quantity", "order total is too large")
+			continue
 		}
-
-		lineTotal := unitPrice * requested.Quantity
-		quote.Items = append(quote.Items, models.QuoteLineItem{
-			ItemID: item.ID, Name: item.Name, Variant: selected, Quantity: requested.Quantity,
-			UnitPriceCents: unitPrice, LineTotalCents: lineTotal,
-		})
-		quote.TotalCents += lineTotal
+		if !stockAvailable(item, selectedOption, requested.Quantity, itemTotals, variantTotals) {
+			message := "requested quantity is not available"
+			if selectedOption != nil && selectedOption.TrackStock {
+				message = "requested variant quantity is not available"
+			}
+			addValidationError(&validationErrors, field+".quantity", message)
+			continue
+		}
+		quote.TotalCents += line.LineTotalCents
+		quote.Items = append(quote.Items, line)
 	}
-	if len(validationErrors) > 0 {
+
+	if len(validationErrors) != 0 {
 		return models.Quote{}, validationErrors
 	}
 	return quote, nil
+}
+
+func quoteLine(item models.Item, requested models.QuoteItemRequest, field string) (models.QuoteLineItem, *models.VariantOption, *models.ValidationError) {
+	line := models.QuoteLineItem{
+		ItemID: item.ID, Name: item.Name, Quantity: requested.Quantity, UnitPriceCents: item.PriceCents,
+	}
+	if len(item.VariantGroups) == 0 {
+		if requested.VariantOptionID != nil {
+			return models.QuoteLineItem{}, nil, &models.ValidationError{
+				Field: field + ".variant_option_id", Message: "item does not have variants",
+			}
+		}
+		return line, nil, nil
+	}
+	if requested.VariantOptionID == nil {
+		return models.QuoteLineItem{}, nil, &models.ValidationError{
+			Field: field + ".variant_option_id", Message: "is required for this item",
+		}
+	}
+
+	option, exists := findOption(item.VariantGroups[0].Options, *requested.VariantOptionID)
+	if !exists {
+		return models.QuoteLineItem{}, nil, &models.ValidationError{
+			Field: field + ".variant_option_id", Message: "does not belong to this item",
+		}
+	}
+	if !option.Available {
+		return models.QuoteLineItem{}, nil, &models.ValidationError{
+			Field: field + ".variant_option_id", Message: "variant is not available",
+		}
+	}
+
+	line.UnitPriceCents = option.PriceCents
+	line.Variant = &models.SelectedVariantOption{ID: option.ID, Name: option.Name}
+	return line, &option, nil
+}
+
+func findOption(options []models.VariantOption, optionID int64) (models.VariantOption, bool) {
+	for _, option := range options {
+		if option.ID == optionID {
+			return option, true
+		}
+	}
+	return models.VariantOption{}, false
+}
+
+func stockAvailable(
+	item models.Item,
+	option *models.VariantOption,
+	quantity int,
+	itemTotals map[int64]int,
+	variantTotals map[int64]int,
+) bool {
+	if option != nil && option.TrackStock {
+		variantTotals[option.ID] += quantity
+		return option.StockQuantity != nil && variantTotals[option.ID] <= *option.StockQuantity
+	}
+	if !item.TrackStock {
+		return true
+	}
+	itemTotals[item.ID] += quantity
+	return item.StockQuantity != nil && itemTotals[item.ID] <= *item.StockQuantity
 }
