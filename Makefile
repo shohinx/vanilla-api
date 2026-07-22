@@ -43,6 +43,17 @@ docker-down:
 test:
 	@echo "Testing..."
 	@go test -mod=mod ./... -v
+
+# Apply idempotent PostgreSQL migrations in filename order.
+migrate:
+	@set -a; \
+	if [ -f "$(ENV_FILE)" ]; then . "./$(ENV_FILE)"; fi; \
+	set +a; \
+	db_url="$${DATABASE_URL:-postgresql://$${BLUEPRINT_DB_USERNAME:-postgres}:$${BLUEPRINT_DB_PASSWORD:-postgres}@$${BLUEPRINT_DB_HOST:-localhost}:$${BLUEPRINT_DB_PORT:-5432}/$${BLUEPRINT_DB_DATABASE:-vanilla_api}}"; \
+	for migration in internal/sdk/sqldb/migrations/*.sql; do \
+		echo "Applying $$migration"; \
+		psql "$$db_url" -X -v ON_ERROR_STOP=1 -f "$$migration"; \
+	done
 # Integrations Tests for the application
 itest:
 	@echo "Running integration tests..."
@@ -74,5 +85,5 @@ watch:
             fi; \
         fi
 
-.PHONY: all build run test clean watch docker-run docker-down itest \
+.PHONY: all build run test migrate clean watch docker-run docker-down itest \
 	seaweed-check

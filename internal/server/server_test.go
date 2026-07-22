@@ -1,63 +1,100 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/shohinx/vanilla-api/internal/sdk/models"
+	"github.com/shohinx/vanilla-api/internal/sdk/sqldb"
 )
 
-func TestApplicationClosesResourcesExactlyOnce(t *testing.T) {
-	closeCalls := 0
-	closeCause := errors.New("close failed")
-	application := &Application{
-		Server: &http.Server{},
-		closeFunc: func() error {
-			closeCalls++
-			return closeCause
-		},
-	}
-
-	firstErr := application.Close()
-	secondErr := application.Close()
-	if closeCalls != 1 {
-		t.Fatalf("expected one resource close, got %d", closeCalls)
-	}
-	if !errors.Is(firstErr, closeCause) || !errors.Is(secondErr, closeCause) {
-		t.Fatalf("expected close cause to remain unwrap-able: first=%v second=%v", firstErr, secondErr)
-	}
+type fakeRepository struct {
+	health      map[string]string
+	snapshot    models.PublicMenuSnapshot
+	snapshotErr error
+	slug        string
 }
 
-func TestSplitCSVUsesTrimmedNonEmptyValues(t *testing.T) {
-	values := splitCSV(" https://one.example, ,https://two.example ")
-	if len(values) != 2 || values[0] != "https://one.example" || values[1] != "https://two.example" {
-		t.Fatalf("unexpected values: %v", values)
-	}
+func (f *fakeRepository) Health() map[string]string {
+	return f.health
 }
 
-func TestConfigValidationRejectsPartialOrUnsafeValues(t *testing.T) {
-	for name, config := range map[string]Config{
-		"partial Dub configuration": {DubAPIKey: "token"},
-		"Dub domain with a port":    {DubAPIKey: "token", DubDomain: "dub.sh:443", DubLinkKey: "menu"},
-		"relative menu URL":         {MenuAppURL: "/menu"},
-		"invalid public URL scheme": {PublicBaseURL: "ftp://api.example.com"},
-		"invalid allowed origin":    {AllowedOrigins: []string{"api.example.com"}},
+func (f *fakeRepository) PublicMenuSnapshot(_ context.Context, slug string) (models.PublicMenuSnapshot, error) {
+	f.slug = slug
+	return f.snapshot, f.snapshotErr
+}
+
+func TestReadiness(t *testing.T) {
+	for name, test := range map[string]struct {
+		health map[string]string
+		status int
+	}{
+		"up":   {health: map[string]string{"status": "up"}, status: http.StatusOK},
+		"down": {health: map[string]string{"status": "down"}, status: http.StatusServiceUnavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := config.validate(); err == nil {
-				t.Fatalf("expected config to be rejected: %+v", config)
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/health/readiness", nil)
+			response := httptest.NewRecorder()
+
+			New(&fakeRepository{health: test.health}).RegisterRoutes().ServeHTTP(response, request)
+
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d", response.Code, test.status)
 			}
 		})
 	}
+}
 
-	valid := Config{
-		MenuAppURL:     "https://menu.example.com",
-		PublicBaseURL:  "https://api.example.com",
-		AllowedOrigins: []string{"https://menu.example.com"},
-		DubAPIKey:      "token",
-		DubDomain:      "dub.sh",
-		DubLinkKey:     "menu",
+func TestPublicMenuReturnsCompleteRestaurantSnapshot(t *testing.T) {
+	generatedAt := time.Date(2026, time.July, 22, 18, 0, 0, 0, time.UTC)
+	repository := &fakeRepository{snapshot: models.PublicMenuSnapshot{
+		Payload:     []byte(`{"restaurant":{"name":"Vanilla Bakery"},"sections":[{"name":"Cakes","items":[]},{"name":"Drinks","items":[]}]}`),
+		ETag:        "full-menu-v1",
+		GeneratedAt: generatedAt,
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/restaurants/vanilla-bakery/menu", nil)
+	response := httptest.NewRecorder()
+
+	New(repository).RegisterRoutes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
 	}
-	if err := valid.validate(); err != nil {
-		t.Fatalf("expected valid config, got %v", err)
+	if repository.slug != "vanilla-bakery" {
+		t.Fatalf("restaurant slug = %q, want %q", repository.slug, "vanilla-bakery")
+	}
+	if response.Header().Get("ETag") != `"full-menu-v1"` {
+		t.Fatalf("ETag = %q", response.Header().Get("ETag"))
+	}
+	if response.Body.String() != string(repository.snapshot.Payload) {
+		t.Fatalf("body = %s", response.Body.String())
+	}
+}
+
+func TestPublicMenuNotFound(t *testing.T) {
+	repository := &fakeRepository{snapshotErr: sqldb.ErrDBNotFound}
+	request := httptest.NewRequest(http.MethodGet, "/restaurants/missing/menu", nil)
+	response := httptest.NewRecorder()
+
+	New(repository).RegisterRoutes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestPublicMenuUnavailable(t *testing.T) {
+	repository := &fakeRepository{snapshotErr: errors.New("database unavailable")}
+	request := httptest.NewRequest(http.MethodGet, "/restaurants/vanilla-bakery/menu", nil)
+	response := httptest.NewRecorder()
+
+	New(repository).RegisterRoutes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
 	}
 }

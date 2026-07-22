@@ -1,0 +1,340 @@
+{
+  "login": {
+    "id": "10000000-0000-4000-8000-000000000001",
+    "name": "Vanilla Owner",
+    "username": "vanilla1",
+    "email": "owner@vanilla.local",
+    "temporary_password": "Vanilla123!",
+    "role": "owner"
+  },
+  "organization": {
+    "id": "20000000-0000-4000-8000-000000000001",
+    "name": "Vanilla Test Kitchen",
+    "slug": "vanilla-test-kitchen"
+  },
+  "membership": {
+    "user_id": "10000000-0000-4000-8000-000000000001",
+    "organization_id": "20000000-0000-4000-8000-000000000001",
+    "role": "owner",
+    "status": "active"
+  },
+  "restaurant": {
+    "id": "30000000-0000-4000-8000-000000000001",
+    "organization_id": "20000000-0000-4000-8000-000000000001",
+    "name": "Vanilla Bakery",
+    "slug": "vanilla-bakery",
+    "timezone": "America/Los_Angeles",
+    "currency": "USD",
+    "status": "active"
+  },
+  "allergens": [
+    {
+      "id": "40000000-0000-4000-8000-000000000001",
+      "organization_id": "20000000-0000-4000-8000-000000000001",
+      "name": "Gluten",
+      "code": "gluten",
+      "description": "Contains wheat or other gluten-bearing grains"
+    },
+    {
+      "id": "40000000-0000-4000-8000-000000000002",
+      "organization_id": "20000000-0000-4000-8000-000000000001",
+      "name": "Milk",
+      "code": "milk",
+      "description": "Contains milk or dairy products"
+    },
+    {
+      "id": "40000000-0000-4000-8000-000000000003",
+      "organization_id": "20000000-0000-4000-8000-000000000001",
+      "name": "Peanuts",
+      "code": "peanuts",
+      "description": "Contains peanuts or peanut-derived ingredients"
+    }
+  ],
+  "business_hours": [
+    {
+      "id": "70000000-0000-4000-8000-000000000001",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "day_of_week": 1,
+      "opens_at": "08:00",
+      "closes_at": "18:00"
+    },
+    {
+      "id": "70000000-0000-4000-8000-000000000002",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "day_of_week": 2,
+      "opens_at": "08:00",
+      "closes_at": "18:00"
+    },
+    {
+      "id": "70000000-0000-4000-8000-000000000003",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "day_of_week": 3,
+      "opens_at": "08:00",
+      "closes_at": "18:00"
+    },
+    {
+      "id": "70000000-0000-4000-8000-000000000004",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "day_of_week": 4,
+      "opens_at": "08:00",
+      "closes_at": "18:00"
+    },
+    {
+      "id": "70000000-0000-4000-8000-000000000005",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "day_of_week": 5,
+      "opens_at": "08:00",
+      "closes_at": "18:00"
+    },
+    {
+      "id": "70000000-0000-4000-8000-000000000006",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "day_of_week": 6,
+      "opens_at": "09:00",
+      "closes_at": "16:00"
+    }
+  ],
+  "special_hours": [
+    {
+      "id": "80000000-0000-4000-8000-000000000001",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "date": "2026-12-24",
+      "opens_at": "09:00",
+      "closes_at": "14:00",
+      "is_closed": false,
+      "note": "Christmas Eve"
+    },
+    {
+      "id": "80000000-0000-4000-8000-000000000002",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "date": "2026-12-25",
+      "is_closed": true,
+      "note": "Christmas Day"
+    }
+  ],
+  "catalog_items": [
+    {
+      "id": "90000000-0000-4000-8000-000000000001",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Butter Croissant",
+      "description": "A flaky, buttery French pastry baked fresh each morning.",
+      "price_cents": 450,
+      "variants": [],
+      "status": "active"
+    },
+    {
+      "id": "90000000-0000-4000-8000-000000000002",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Blueberry Muffin",
+      "description": "A soft muffin filled with blueberries.",
+      "price_cents": 500,
+      "variants": [],
+      "status": "active"
+    },
+    {
+      "id": "90000000-0000-4000-8000-000000000003",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Cappuccino",
+      "description": "Espresso with steamed milk and a layer of foam.",
+      "price_cents": 0,
+      "variants": [
+        {
+          "name": "Small",
+          "price_cents": 450
+        },
+        {
+          "name": "Medium",
+          "price_cents": 525
+        },
+        {
+          "name": "Large",
+          "price_cents": 600
+        }
+      ],
+      "status": "active"
+    },
+    {
+      "id": "90000000-0000-4000-8000-000000000004",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Vanilla Cheesecake",
+      "description": "Creamy vanilla cheesecake with a buttery biscuit crust.",
+      "price_cents": 0,
+      "variants": [
+        {
+          "name": "Slice",
+          "price_cents": 750
+        },
+        {
+          "name": "Whole Cake",
+          "price_cents": 4800
+        }
+      ],
+      "status": "active"
+    }
+  ],
+  "ingredients": [
+    {
+      "id": "a0000000-0000-4000-8000-000000000001",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Wheat flour"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000002",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Butter"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000003",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Milk"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000004",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Eggs"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000005",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Yeast"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000006",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Salt"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000007",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Coffee beans"
+    },
+    {
+      "id": "a0000000-0000-4000-8000-000000000008",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Blueberries"
+    }
+  ],
+  "menus": [
+    {
+      "id": "b0000000-0000-4000-8000-000000000001",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Breakfast Menu",
+      "description": "Fresh pastries and breakfast favorites.",
+      "code": "breakfast",
+      "status": "active"
+    },
+    {
+      "id": "b0000000-0000-4000-8000-000000000002",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Drinks Menu",
+      "description": "Coffee and other drinks prepared to order.",
+      "code": "drinks",
+      "status": "active"
+    }
+  ],
+  "menu_schedules": [
+    {
+      "id": "d0000000-0000-4000-8000-000000000001",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "menu_id": "b0000000-0000-4000-8000-000000000001",
+      "weekday_mask": 127,
+      "start_local_time": "08:00",
+      "end_local_time": "14:00",
+      "priority": 100,
+      "status": "active"
+    },
+    {
+      "id": "d0000000-0000-4000-8000-000000000002",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "menu_id": "b0000000-0000-4000-8000-000000000002",
+      "weekday_mask": 127,
+      "start_local_time": "08:00",
+      "end_local_time": "18:00",
+      "priority": 90,
+      "status": "active"
+    }
+  ],
+  "menu_sections": [
+    {
+      "id": "e1000000-0000-4000-8000-000000000001",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "menu_id": "b0000000-0000-4000-8000-000000000001",
+      "name": "Pastries",
+      "description": "Fresh pastries baked for breakfast.",
+      "sort_order": 10,
+      "status": "active"
+    },
+    {
+      "id": "e1000000-0000-4000-8000-000000000002",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "menu_id": "b0000000-0000-4000-8000-000000000001",
+      "name": "Cakes",
+      "description": "Cakes available by the slice or whole.",
+      "sort_order": 20,
+      "status": "active"
+    },
+    {
+      "id": "e1000000-0000-4000-8000-000000000003",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "menu_id": "b0000000-0000-4000-8000-000000000002",
+      "name": "Coffee",
+      "description": "Espresso-based drinks.",
+      "sort_order": 10,
+      "status": "active"
+    }
+  ],
+  "menu_entries": [
+    {
+      "id": "e2000000-0000-4000-8000-000000000001",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "menu_section_id": "e1000000-0000-4000-8000-000000000001",
+      "catalog_item_id": "90000000-0000-4000-8000-000000000001",
+      "sort_order": 10,
+      "status": "active"
+    },
+    {
+      "id": "e2000000-0000-4000-8000-000000000002",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "menu_section_id": "e1000000-0000-4000-8000-000000000001",
+      "catalog_item_id": "90000000-0000-4000-8000-000000000002",
+      "sort_order": 20,
+      "status": "active"
+    },
+    {
+      "id": "e2000000-0000-4000-8000-000000000003",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "menu_section_id": "e1000000-0000-4000-8000-000000000002",
+      "catalog_item_id": "90000000-0000-4000-8000-000000000004",
+      "sort_order": 10,
+      "status": "active"
+    },
+    {
+      "id": "e2000000-0000-4000-8000-000000000004",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "menu_section_id": "e1000000-0000-4000-8000-000000000003",
+      "catalog_item_id": "90000000-0000-4000-8000-000000000003",
+      "sort_order": 10,
+      "status": "active"
+    }
+  ],
+  "daily_specials": [
+    {
+      "id": "c0000000-0000-4000-8000-000000000001",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Weekend Pastry Box",
+      "description": "A rotating selection of six fresh pastries.",
+      "starts_on": "2026-07-25",
+      "ends_on": "2026-07-26",
+      "status": "active"
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000002",
+      "restaurant_id": "30000000-0000-4000-8000-000000000001",
+      "name": "Friday Cheesecake Slice",
+      "description": "A featured cheesecake slice available on Friday.",
+      "starts_on": "2026-07-24",
+      "ends_on": "2026-07-24",
+      "status": "active"
+    }
+  ]
+}

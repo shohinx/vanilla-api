@@ -1,7 +1,6 @@
 package models
 
 import (
-	"iter"
 	"time"
 )
 
@@ -11,194 +10,329 @@ const (
 	OrderStatusCancelled = "cancelled"
 )
 
-type Menu struct {
-	GeneratedAt time.Time  `json:"generated_at"`
-	Categories  []Category `json:"categories"`
+type Role string
+
+const (
+	RoleOwner Role = "owner"
+	RoleAdmin Role = "admin"
+	RoleUser  Role = "user"
+)
+
+func (r Role) Valid() bool {
+	return r == RoleUser || r == RoleAdmin || r == RoleOwner
 }
 
-// Items returns every menu item in category order without allocating an
-// intermediate slice.
-func (m Menu) Items() iter.Seq[Item] {
-	return func(yield func(Item) bool) {
-		for _, category := range m.Categories {
-			for _, item := range category.Items {
-				if !yield(item) {
-					return
-				}
-			}
-		}
-	}
+type Principal struct {
+	ID             string `json:"id"`
+	OrganizationID string `json:"organization_id"`
+	Role           Role   `json:"role"`
 }
 
-type Category struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	SortOrder int    `json:"sort_order"`
-	Items     []Item `json:"items"`
+func (p Principal) CanAdminister() bool {
+	return p.Role == RoleAdmin || p.Role == RoleOwner
 }
 
-type MenuCategory struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	SortOrder int    `json:"sort_order"`
+// RefreshToken represents a refresh token for a user
+type RefreshToken struct {
+	ID        string     `json:"id"`
+	UserID    string     `json:"user_id"`
+	Token     []byte     `json:"-"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
-type NewCategory struct {
-	Name      string `json:"name"`
-	SortOrder int    `json:"sort_order,omitempty"`
+type NewRefreshToken struct {
+	UserID    string
+	Token     []byte
+	ExpiresAt time.Time
 }
 
-type Item struct {
-	ID            int64          `json:"id"`
-	CategoryID    int64          `json:"category_id,omitempty"`
-	Name          string         `json:"name"`
-	Description   string         `json:"description,omitempty"`
-	ImageURL      string         `json:"image_url,omitempty"`
-	PriceCents    int            `json:"price_cents"`
-	Available     bool           `json:"available"`
-	TrackStock    bool           `json:"track_stock"`
-	StockQuantity *int           `json:"stock_qty,omitempty"`
-	VariantGroups []VariantGroup `json:"variant_groups,omitempty"`
+// User represents a user in the system
+type User struct {
+	ID            string    `json:"id"`
+	Name          string    `json:"name"`
+	Username      string    `json:"username"`
+	Email         string    `json:"email"`
+	Password      []byte    `json:"-"`
+	AvatarPhotoID *int      `json:"avatar_photo_id,omitempty"`
+	Role          Role      `json:"role"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
-type ItemImage struct {
-	ItemID    int64     `json:"item_id"`
-	ImageURL  string    `json:"image_url"`
+type NewUser struct {
+	Name            string `json:"name"`
+	Username        string `json:"username"`
+	Email           string `json:"email"`
+	Password        []byte `json:"password"`
+	PasswordConfirm []byte `json:"password_confirm"`
+}
+
+type UpdateUsername struct {
+	Username string `json:"username"`
+}
+
+// PasswordResetToken represents a password reset token for a user
+type PasswordResetToken struct {
+	ID        string     `json:"id"`
+	UserID    string     `json:"user_id"`
+	Token     string     `json:"-"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	UsedAt    *time.Time `json:"used_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+type NewPasswordResetToken struct {
+	UserID    string
+	Token     string
+	ExpiresAt time.Time
+}
+
+type PublicMenuSnapshot struct {
+	Payload     []byte
+	ETag        string
+	GeneratedAt time.Time
+}
+
+// Admin
+
+type tenantScope uint8
+
+const (
+	scopeGlobal tenantScope = iota
+	scopeOrganization
+	scopeRestaurant
+)
+
+type AdminScope struct {
+	OrganizationID string
+	RestaurantID   string
+}
+
+type MutationContext struct {
+	ActorID   string
+	RequestID string
+}
+
+type Membership struct {
+	UserID         string `json:"user_id"`
+	OrganizationID string `json:"organization_id"`
+	Role           string `json:"role"`
+	Status         string `json:"status"`
+}
+
+type MembershipInput struct {
+	AuthSubject string
+	Email       string
+	Role        string
+	Status      string
+}
+
+type Organization struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-type VariantGroup struct {
-	ID       int64           `json:"id"`
-	Name     string          `json:"name"`
-	Required bool            `json:"required"`
-	Options  []VariantOption `json:"options"`
+type OrganizationInput struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
 }
 
-type VariantOption struct {
-	ID            int64  `json:"id"`
-	Name          string `json:"name"`
-	PriceCents    int    `json:"price_cents"`
-	Available     bool   `json:"available"`
-	TrackStock    bool   `json:"track_stock"`
-	StockQuantity *int   `json:"stock_qty,omitempty"`
+type Restaurant struct {
+	ID             string `json:"id"`
+	OrganizationID string `json:"organization_id"`
+	Name           string `json:"name"`
+	Slug           string `json:"slug"`
+	Timezone       string `json:"timezone"`
+	Currency       string `json:"currency"`
+	Status         string `json:"status"`
 }
 
-type NewItem struct {
-	CategoryID    int64            `json:"category_id"`
-	Name          string           `json:"name"`
-	Description   string           `json:"description,omitempty"`
-	ImageURL      *string          `json:"image_url,omitempty"`
-	PriceCents    int              `json:"price_cents"`
-	TrackStock    bool             `json:"track_stock"`
-	StockQuantity *int             `json:"stock_qty,omitempty"`
-	Available     *bool            `json:"available,omitempty"`
-	SortOrder     int              `json:"sort_order,omitempty"`
-	VariantGroup  *NewVariantGroup `json:"variant_group,omitempty"`
+type RestaurantInput struct {
+	Name     string `json:"name"`
+	Slug     string `json:"slug"`
+	Timezone string `json:"timezone"`
+	Currency string `json:"currency"`
+	Status   string `json:"status"`
 }
 
-type NewVariantGroup struct {
-	Name     string             `json:"name"`
-	Required *bool              `json:"required,omitempty"`
-	Options  []NewVariantOption `json:"options"`
+type BusinessHour struct {
+	ID           string `json:"id"`
+	RestaurantID string `json:"restaurant_id"`
+	DayOfWeek    int    `json:"day_of_week"`
+	OpensAt      string `json:"opens_at"`
+	ClosesAt     string `json:"closes_at"`
 }
 
-type NewVariantOption struct {
-	Name          string `json:"name"`
-	PriceCents    int    `json:"price_cents"`
-	TrackStock    bool   `json:"track_stock"`
-	StockQuantity *int   `json:"stock_qty,omitempty"`
+type BusinessHourInput struct {
+	DayOfWeek int    `json:"day_of_week"`
+	OpensAt   string `json:"opens_at"`
+	ClosesAt  string `json:"closes_at"`
 }
 
-type Inventory struct {
-	ItemID    int64     `json:"item_id"`
-	Quantity  int       `json:"stock_qty"`
-	Available bool      `json:"available"`
-	UpdatedAt time.Time `json:"updated_at"`
+type SpecialHour struct {
+	ID           string `json:"id"`
+	RestaurantID string `json:"restaurant_id"`
+	Date         string `json:"date"`
+	OpensAt      string `json:"opens_at,omitempty"`
+	ClosesAt     string `json:"closes_at,omitempty"`
+	IsClosed     bool   `json:"is_closed"`
+	Note         string `json:"note,omitempty"`
 }
 
-type VariantInventory struct {
-	VariantOptionID int64 `json:"variant_option_id"`
-	Quantity        int   `json:"stock_qty"`
-	Available       bool  `json:"available"`
+type SpecialHourInput struct {
+	Date     string `json:"date"`
+	OpensAt  string `json:"opens_at,omitempty"`
+	ClosesAt string `json:"closes_at,omitempty"`
+	IsClosed bool   `json:"is_closed"`
+	Note     string `json:"note,omitempty"`
 }
 
-type ItemAvailability struct {
-	ItemID    int64     `json:"item_id"`
-	Available bool      `json:"available"`
-	UpdatedAt time.Time `json:"updated_at"`
+type CatalogItem struct {
+	ID           string               `json:"id"`
+	RestaurantID string               `json:"restaurant_id"`
+	Name         string               `json:"name"`
+	Description  string               `json:"description,omitempty"`
+	PriceCents   int                  `json:"price_cents"`
+	Variants     []CatalogItemVariant `json:"variants"`
+	Status       string               `json:"status"`
 }
 
-type QuoteRequest struct {
-	Items []QuoteItemRequest `json:"items"`
+type CatalogItemInput struct {
+	Name        string               `json:"name"`
+	Description string               `json:"description,omitempty"`
+	PriceCents  int                  `json:"price_cents"`
+	Variants    []CatalogItemVariant `json:"variants"`
+	Status      string               `json:"status"`
 }
 
-type SubmitOrderRequest struct {
-	TableNumber string             `json:"table_number"`
-	GuestCount  int                `json:"guest_count"`
-	Items       []QuoteItemRequest `json:"items"`
+type CatalogItemVariant struct {
+	Name       string `json:"name"`
+	PriceCents int    `json:"price_cents"`
 }
 
-type QuoteItemRequest struct {
-	ItemID          int64  `json:"item_id"`
-	VariantOptionID *int64 `json:"variant_option_id,omitempty"`
-	Quantity        int    `json:"quantity"`
+type Ingredient struct {
+	ID           string `json:"id"`
+	RestaurantID string `json:"restaurant_id"`
+	Name         string `json:"name"`
 }
 
-type Quote struct {
-	TotalCents int             `json:"total_cents"`
-	Items      []QuoteLineItem `json:"items"`
-}
-
-type QuoteLineItem struct {
-	ItemID         int64                  `json:"item_id"`
-	Name           string                 `json:"name"`
-	Variant        *SelectedVariantOption `json:"variant,omitempty"`
-	Quantity       int                    `json:"quantity"`
-	UnitPriceCents int                    `json:"unit_price_cents"`
-	LineTotalCents int                    `json:"line_total_cents"`
-}
-
-type SelectedVariantOption struct {
-	ID   int64  `json:"id"`
+type IngredientInput struct {
 	Name string `json:"name"`
 }
 
-type Order struct {
-	ID          int64           `json:"id"`
-	OrderNumber string          `json:"order_number"`
-	StaffID     *int64          `json:"staff_id,omitempty"`
-	StaffName   string          `json:"staff_name,omitempty"`
-	TableNumber string          `json:"table_number"`
-	GuestCount  int             `json:"guest_count"`
-	Status      string          `json:"status"`
-	TotalCents  int             `json:"total_cents"`
-	Items       []QuoteLineItem `json:"items"`
-	CreatedAt   time.Time       `json:"created_at"`
-	SoldAt      *time.Time      `json:"sold_at,omitempty"`
+type Menu struct {
+	ID           string `json:"id"`
+	RestaurantID string `json:"restaurant_id"`
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	Code         string `json:"code"`
+	Status       string `json:"status"`
 }
 
-type Staff struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	Active    bool      `json:"active"`
-	CreatedAt time.Time `json:"created_at"`
+type MenuInput struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Code        string `json:"code"`
+	Status      string `json:"status"`
 }
 
-type Link struct {
-	ID          string    `json:"id"`
-	ShortLink   string    `json:"short_link"`
-	QRCode      string    `json:"qr_code"`
-	Destination string    `json:"destination"`
-	CreatedAt   time.Time `json:"created_at"`
+type MenuSchedule struct {
+	ID             string    `json:"id"`
+	RestaurantID   string    `json:"restaurant_id"`
+	MenuID         string    `json:"menu_id"`
+	WeekdayMask    int       `json:"weekday_mask"`
+	StartDate      string    `json:"start_date,omitempty"`
+	EndDate        string    `json:"end_date,omitempty"`
+	StartLocalTime string    `json:"start_local_time,omitempty"`
+	EndLocalTime   string    `json:"end_local_time,omitempty"`
+	Priority       int       `json:"priority"`
+	Status         string    `json:"status"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-type ValidationError struct {
-	Field   string `json:"field"`
-	Message string `json:"message"`
+type MenuScheduleInput struct {
+	WeekdayMask    int    `json:"weekday_mask"`
+	StartDate      string `json:"start_date,omitempty"`
+	EndDate        string `json:"end_date,omitempty"`
+	StartLocalTime string `json:"start_local_time,omitempty"`
+	EndLocalTime   string `json:"end_local_time,omitempty"`
+	Priority       int    `json:"priority"`
+	Status         string `json:"status"`
 }
 
-type ValidationErrors []ValidationError
+type MenuSection struct {
+	ID           string      `json:"id"`
+	RestaurantID string      `json:"restaurant_id"`
+	MenuID       string      `json:"menu_id"`
+	Name         string      `json:"name"`
+	Description  string      `json:"description,omitempty"`
+	SortOrder    int         `json:"sort_order"`
+	Status       string      `json:"status"`
+	Entries      []MenuEntry `json:"entries"`
+	CreatedAt    time.Time   `json:"created_at"`
+	UpdatedAt    time.Time   `json:"updated_at"`
+}
 
-func (e ValidationErrors) Error() string {
-	return "request validation failed"
+type MenuSectionInput struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	SortOrder   int    `json:"sort_order"`
+	Status      string `json:"status"`
+}
+
+type MenuEntry struct {
+	ID            string      `json:"id"`
+	RestaurantID  string      `json:"restaurant_id"`
+	MenuSectionID string      `json:"menu_section_id"`
+	CatalogItemID string      `json:"catalog_item_id"`
+	SortOrder     int         `json:"sort_order"`
+	Status        string      `json:"status"`
+	CatalogItem   CatalogItem `json:"catalog_item"`
+	CreatedAt     time.Time   `json:"created_at"`
+	UpdatedAt     time.Time   `json:"updated_at"`
+}
+
+type MenuEntryInput struct {
+	CatalogItemID string `json:"catalog_item_id"`
+	SortOrder     int    `json:"sort_order"`
+	Status        string `json:"status"`
+}
+
+type DailySpecial struct {
+	ID           string `json:"id"`
+	RestaurantID string `json:"restaurant_id"`
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	StartsOn     string `json:"starts_on"`
+	EndsOn       string `json:"ends_on"`
+	Status       string `json:"status"`
+}
+
+type DailySpecialInput struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	StartsOn    string `json:"starts_on"`
+	EndsOn      string `json:"ends_on"`
+	Status      string `json:"status"`
+}
+
+type Allergen struct {
+	ID             string `json:"id"`
+	OrganizationID string `json:"organization_id"`
+	Name           string `json:"name"`
+	Code           string `json:"code"`
+	Description    string `json:"description"`
+}
+
+type AllergenInput struct {
+	Name        string `json:"name"`
+	Code        string `json:"code"`
+	Description string `json:"description"`
 }
