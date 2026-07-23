@@ -315,6 +315,10 @@ type rowScanner interface {
 	Scan(...any) error
 }
 
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 func scanUser(row rowScanner) (models.User, error) {
 	var user models.User
 	err := row.Scan(
@@ -1189,6 +1193,7 @@ func normalizeClockRange(opensAt, closesAt string) (string, string, error) {
 func scanCatalogItem(row rowScanner) (models.CatalogItem, error) {
 	var item models.CatalogItem
 	var variantsJSON []byte
+	var allergensJSON []byte
 	if err := row.Scan(
 		&item.ID,
 		&item.RestaurantID,
@@ -1196,6 +1201,7 @@ func scanCatalogItem(row rowScanner) (models.CatalogItem, error) {
 		&item.Description,
 		&item.PriceCents,
 		&variantsJSON,
+		&allergensJSON,
 		&item.Status,
 	); err != nil {
 		return models.CatalogItem{}, mapDBError(err)
@@ -1206,12 +1212,39 @@ func scanCatalogItem(row rowScanner) (models.CatalogItem, error) {
 	if item.Variants == nil {
 		item.Variants = make([]models.CatalogItemVariant, 0)
 	}
+	if err := json.Unmarshal(allergensJSON, &item.Allergens); err != nil {
+		return models.CatalogItem{}, fmt.Errorf("decode catalog item allergens: %w", err)
+	}
+	if item.Allergens == nil {
+		item.Allergens = make([]models.CatalogItemAllergen, 0)
+	}
 	return item, nil
 }
 
+const catalogItemColumns = `
+	ci.id, ci.restaurant_id, ci.name, ci.description, ci.price_cents, ci.variants,
+	COALESCE((
+		SELECT jsonb_agg(
+			jsonb_build_object(
+				'allergen_id', a.id,
+				'name', a.name,
+				'code', a.code,
+				'description', a.description,
+				'relationship', cia.relationship
+			)
+			ORDER BY a.name, a.id
+		)
+		FROM catalog_item_allergens cia
+		JOIN allergens a
+		  ON a.id = cia.allergen_id
+		 AND a.organization_id = cia.organization_id
+		WHERE cia.catalog_item_id = ci.id
+	), '[]'::jsonb),
+	ci.status`
+
 func (s *service) ListCatalogItems(ctx context.Context, organizationID, restaurantID string) ([]models.CatalogItem, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT ci.id, ci.restaurant_id, ci.name, ci.description, ci.price_cents, ci.variants, ci.status
+		SELECT `+catalogItemColumns+`
 		FROM catalog_items ci
 		JOIN restaurants r ON r.id = ci.restaurant_id
 		WHERE r.organization_id = $1 AND ci.restaurant_id = $2
@@ -1249,19 +1282,51 @@ func (s *service) CreateCatalogItem(
 	if err != nil {
 		return models.CatalogItem{}, fmt.Errorf("encode catalog item variants: %w", err)
 	}
-	return scanCatalogItem(s.db.QueryRowContext(ctx, `
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return models.CatalogItem{}, fmt.Errorf("begin catalog item creation: %w", err)
+	}
+	defer tx.Rollback()
+
+	var catalogItemID string
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO catalog_items (restaurant_id, name, description, price_cents, variants, status)
 		SELECT r.id, $3, $4, $5, $6::jsonb, $7
 		FROM restaurants r
 		WHERE r.organization_id = $1 AND r.id = $2
-		RETURNING id, restaurant_id, name, description, price_cents, variants, status`,
+		RETURNING id`,
 		organizationID, restaurantID, input.Name, input.Description, input.PriceCents, variantsJSON, input.Status,
-	))
+	).Scan(&catalogItemID)
+	if err != nil {
+		return models.CatalogItem{}, mapDBError(err)
+	}
+	if err := replaceCatalogItemAllergens(
+		ctx, tx, organizationID, restaurantID, catalogItemID, input.Allergens,
+	); err != nil {
+		return models.CatalogItem{}, err
+	}
+	item, err := getCatalogItem(ctx, tx, organizationID, restaurantID, catalogItemID)
+	if err != nil {
+		return models.CatalogItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return models.CatalogItem{}, fmt.Errorf("commit catalog item creation: %w", err)
+	}
+	return item, nil
 }
 
 func (s *service) GetCatalogItem(ctx context.Context, organizationID, restaurantID, catalogItemID string) (models.CatalogItem, error) {
-	return scanCatalogItem(s.db.QueryRowContext(ctx, `
-		SELECT ci.id, ci.restaurant_id, ci.name, ci.description, ci.price_cents, ci.variants, ci.status
+	return getCatalogItem(ctx, s.db, organizationID, restaurantID, catalogItemID)
+}
+
+func getCatalogItem(
+	ctx context.Context,
+	queryer rowQueryer,
+	organizationID, restaurantID, catalogItemID string,
+) (models.CatalogItem, error) {
+	return scanCatalogItem(queryer.QueryRowContext(ctx, `
+		SELECT `+catalogItemColumns+`
 		FROM catalog_items ci
 		JOIN restaurants r ON r.id = ci.restaurant_id
 		WHERE r.organization_id = $1 AND ci.restaurant_id = $2 AND ci.id = $3`,
@@ -1283,16 +1348,40 @@ func (s *service) UpdateCatalogItem(
 	if err != nil {
 		return models.CatalogItem{}, fmt.Errorf("encode catalog item variants: %w", err)
 	}
-	return scanCatalogItem(s.db.QueryRowContext(ctx, `
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return models.CatalogItem{}, fmt.Errorf("begin catalog item update: %w", err)
+	}
+	defer tx.Rollback()
+
+	var updatedCatalogItemID string
+	err = tx.QueryRowContext(ctx, `
 		UPDATE catalog_items ci
 		SET name = $4, description = $5, price_cents = $6, variants = $7::jsonb, status = $8
 		FROM restaurants r
 		WHERE ci.id = $3 AND ci.restaurant_id = $2
 		  AND r.id = ci.restaurant_id AND r.organization_id = $1
-		RETURNING ci.id, ci.restaurant_id, ci.name, ci.description, ci.price_cents, ci.variants, ci.status`,
+		RETURNING ci.id`,
 		organizationID, restaurantID, catalogItemID,
 		input.Name, input.Description, input.PriceCents, variantsJSON, input.Status,
-	))
+	).Scan(&updatedCatalogItemID)
+	if err != nil {
+		return models.CatalogItem{}, mapDBError(err)
+	}
+	if err := replaceCatalogItemAllergens(
+		ctx, tx, organizationID, restaurantID, updatedCatalogItemID, input.Allergens,
+	); err != nil {
+		return models.CatalogItem{}, err
+	}
+	item, err := getCatalogItem(ctx, tx, organizationID, restaurantID, updatedCatalogItemID)
+	if err != nil {
+		return models.CatalogItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return models.CatalogItem{}, fmt.Errorf("commit catalog item update: %w", err)
+	}
+	return item, nil
 }
 
 func (s *service) DeleteCatalogItem(
@@ -1336,7 +1425,77 @@ func normalizeCatalogItemInput(input models.CatalogItemInput) (models.CatalogIte
 	if input.Variants == nil {
 		input.Variants = make([]models.CatalogItemVariant, 0)
 	}
+	if len(input.Allergens) > 64 {
+		return models.CatalogItemInput{}, ErrInvalidInput
+	}
+	seenAllergens := make(map[string]struct{}, len(input.Allergens))
+	for i := range input.Allergens {
+		input.Allergens[i].AllergenID = strings.TrimSpace(input.Allergens[i].AllergenID)
+		input.Allergens[i].Relationship = strings.ToLower(strings.TrimSpace(input.Allergens[i].Relationship))
+		allergenID, err := uuid.Parse(input.Allergens[i].AllergenID)
+		if err != nil ||
+			(input.Allergens[i].Relationship != "contains" && input.Allergens[i].Relationship != "may_contain") {
+			return models.CatalogItemInput{}, ErrInvalidInput
+		}
+		key := allergenID.String()
+		if _, duplicate := seenAllergens[key]; duplicate {
+			return models.CatalogItemInput{}, ErrInvalidInput
+		}
+		seenAllergens[key] = struct{}{}
+		input.Allergens[i].AllergenID = key
+	}
+	if input.Allergens == nil {
+		input.Allergens = make([]models.CatalogItemAllergenInput, 0)
+	}
 	return input, nil
+}
+
+func replaceCatalogItemAllergens(
+	ctx context.Context,
+	tx *sql.Tx,
+	organizationID, restaurantID, catalogItemID string,
+	assignments []models.CatalogItemAllergenInput,
+) error {
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM catalog_item_allergens WHERE catalog_item_id = $1`,
+		catalogItemID,
+	); err != nil {
+		return mapDBError(err)
+	}
+	for _, assignment := range assignments {
+		result, err := tx.ExecContext(ctx, `
+			INSERT INTO catalog_item_allergens (
+				catalog_item_id, restaurant_id, organization_id, allergen_id, relationship
+			)
+			SELECT ci.id, r.id, r.organization_id, a.id, $5
+			FROM restaurants r
+			JOIN catalog_items ci
+			  ON ci.id = $3
+			 AND ci.restaurant_id = r.id
+			JOIN allergens a
+			  ON a.id = $4
+			 AND a.organization_id = r.organization_id
+			WHERE r.organization_id = $1
+			  AND r.id = $2`,
+			organizationID,
+			restaurantID,
+			catalogItemID,
+			assignment.AllergenID,
+			assignment.Relationship,
+		)
+		if err != nil {
+			return mapDBError(err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if rows != 1 {
+			return ErrInvalidInput
+		}
+	}
+	return nil
 }
 
 func scanIngredient(row rowScanner) (models.Ingredient, error) {
@@ -1732,6 +1891,7 @@ func normalizeMenuSectionInput(input models.MenuSectionInput) (models.MenuSectio
 func scanMenuEntry(row rowScanner) (models.MenuEntry, error) {
 	var entry models.MenuEntry
 	var variantsJSON []byte
+	var allergensJSON []byte
 	if err := row.Scan(
 		&entry.ID,
 		&entry.RestaurantID,
@@ -1747,6 +1907,7 @@ func scanMenuEntry(row rowScanner) (models.MenuEntry, error) {
 		&entry.CatalogItem.Description,
 		&entry.CatalogItem.PriceCents,
 		&variantsJSON,
+		&allergensJSON,
 		&entry.CatalogItem.Status,
 	); err != nil {
 		return models.MenuEntry{}, mapDBError(err)
@@ -1757,6 +1918,12 @@ func scanMenuEntry(row rowScanner) (models.MenuEntry, error) {
 	if entry.CatalogItem.Variants == nil {
 		entry.CatalogItem.Variants = make([]models.CatalogItemVariant, 0)
 	}
+	if err := json.Unmarshal(allergensJSON, &entry.CatalogItem.Allergens); err != nil {
+		return models.MenuEntry{}, fmt.Errorf("decode menu entry catalog allergens: %w", err)
+	}
+	if entry.CatalogItem.Allergens == nil {
+		entry.CatalogItem.Allergens = make([]models.CatalogItemAllergen, 0)
+	}
 	return entry, nil
 }
 
@@ -1764,7 +1931,25 @@ const menuEntryColumns = `
 	me.id, me.restaurant_id, me.menu_section_id, me.catalog_item_id,
 	me.sort_order, me.status, me.created_at, me.updated_at,
 	ci.id, ci.restaurant_id, ci.name, ci.description,
-	ci.price_cents, ci.variants, ci.status`
+	ci.price_cents, ci.variants,
+	COALESCE((
+		SELECT jsonb_agg(
+			jsonb_build_object(
+				'allergen_id', a.id,
+				'name', a.name,
+				'code', a.code,
+				'description', a.description,
+				'relationship', cia.relationship
+			)
+			ORDER BY a.name, a.id
+		)
+		FROM catalog_item_allergens cia
+		JOIN allergens a
+		  ON a.id = cia.allergen_id
+		 AND a.organization_id = cia.organization_id
+		WHERE cia.catalog_item_id = ci.id
+	), '[]'::jsonb),
+	ci.status`
 
 func (s *service) listMenuEntries(
 	ctx context.Context,

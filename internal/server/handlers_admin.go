@@ -1114,6 +1114,8 @@ func writeAllergenMutationError(c *gin.Context, err error) {
 		writeError(c, http.StatusNotFound, "allergen_not_found", nil)
 	case errors.Is(err, sqldb.ErrDBDuplicatedEntry):
 		writeError(c, http.StatusConflict, "allergen_already_exists", nil)
+	case errors.Is(err, sqldb.ErrForeignKeyViolation):
+		writeError(c, http.StatusConflict, "allergen_in_use", nil)
 	case errors.Is(err, sqldb.ErrInvalidInput):
 		writeError(c, http.StatusBadRequest, "invalid_allergen", nil)
 	default:

@@ -82,6 +82,39 @@ Variants are optional display choices such as Small/Large or Slice/Whole Cake. T
 
 Items without choices use the catalog item's `price_cents` and send `"variants": []`. The public menu returns each item with the same complete ordered array; customers only view it and do not select or submit a variant.
 
+### Catalog item allergens
+
+Allergen definitions belong to the organization and are managed under
+`/api/v1/admin/organizations/:organizationID/allergens`. Each restaurant then
+assigns the relevant organization allergens to its own catalog items, allowing
+restaurants with different recipes to publish different disclosures.
+
+Catalog item create and update requests replace the complete `allergens` array:
+
+```json
+{
+  "name": "Almond Croissant",
+  "price_cents": 650,
+  "variants": [],
+  "allergens": [
+    {
+      "allergen_id": "40000000-0000-4000-8000-000000000001",
+      "relationship": "contains"
+    },
+    {
+      "allergen_id": "40000000-0000-4000-8000-000000000002",
+      "relationship": "may_contain"
+    }
+  ],
+  "status": "active"
+}
+```
+
+`relationship` must be `contains` or `may_contain`. The assigned allergen must
+belong to the same organization as the catalog item's restaurant. Catalog item,
+menu-entry, and public-menu responses return the resolved allergen name, code,
+description, and relationship.
+
 ## Commands
 
 ```bash

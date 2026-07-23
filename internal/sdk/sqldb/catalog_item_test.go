@@ -16,6 +16,10 @@ func TestNormalizeCatalogItemInput(t *testing.T) {
 			{Name: "  Small  ", PriceCents: 450},
 			{Name: "Large", PriceCents: 600},
 		},
+		Allergens: []models.CatalogItemAllergenInput{
+			{AllergenID: "  40000000-0000-4000-8000-000000000001  ", Relationship: " CONTAINS "},
+			{AllergenID: "40000000-0000-4000-8000-000000000002", Relationship: "may_contain"},
+		},
 	})
 	if err != nil {
 		t.Fatalf("normalize catalog item: %v", err)
@@ -26,20 +30,42 @@ func TestNormalizeCatalogItemInput(t *testing.T) {
 	if len(input.Variants) != 2 || input.Variants[0].Name != "Small" || input.Variants[1].PriceCents != 600 {
 		t.Fatalf("normalized variants = %+v", input.Variants)
 	}
+	if len(input.Allergens) != 2 ||
+		input.Allergens[0].AllergenID != "40000000-0000-4000-8000-000000000001" ||
+		input.Allergens[0].Relationship != "contains" {
+		t.Fatalf("normalized allergens = %+v", input.Allergens)
+	}
 
 	tooManyVariants := make([]models.CatalogItemVariant, 21)
 	for i := range tooManyVariants {
 		tooManyVariants[i] = models.CatalogItemVariant{Name: fmt.Sprintf("Size %d", i), PriceCents: 100}
 	}
+	tooManyAllergens := make([]models.CatalogItemAllergenInput, 65)
+	for i := range tooManyAllergens {
+		tooManyAllergens[i] = models.CatalogItemAllergenInput{
+			AllergenID:   fmt.Sprintf("40000000-0000-4000-8000-%012d", i),
+			Relationship: "contains",
+		}
+	}
 
 	for name, invalid := range map[string]models.CatalogItemInput{
-		"missing name":           {},
-		"negative item price":    {Name: "Croissant", PriceCents: -1},
-		"unsupported status":     {Name: "Croissant", Status: "archived"},
-		"too many variants":      {Name: "Coffee", Variants: tooManyVariants},
-		"missing variant name":   {Name: "Coffee", Variants: []models.CatalogItemVariant{{PriceCents: 450}}},
-		"negative variant price": {Name: "Coffee", Variants: []models.CatalogItemVariant{{Name: "Small", PriceCents: -1}}},
-		"duplicate variant name": {Name: "Coffee", Variants: []models.CatalogItemVariant{{Name: "Small"}, {Name: " small "}}},
+		"missing name":                  {},
+		"negative item price":           {Name: "Croissant", PriceCents: -1},
+		"unsupported status":            {Name: "Croissant", Status: "archived"},
+		"too many variants":             {Name: "Coffee", Variants: tooManyVariants},
+		"missing variant name":          {Name: "Coffee", Variants: []models.CatalogItemVariant{{PriceCents: 450}}},
+		"negative variant price":        {Name: "Coffee", Variants: []models.CatalogItemVariant{{Name: "Small", PriceCents: -1}}},
+		"duplicate variant name":        {Name: "Coffee", Variants: []models.CatalogItemVariant{{Name: "Small"}, {Name: " small "}}},
+		"too many allergens":            {Name: "Coffee", Allergens: tooManyAllergens},
+		"invalid allergen id":           {Name: "Coffee", Allergens: []models.CatalogItemAllergenInput{{AllergenID: "not-a-uuid", Relationship: "contains"}}},
+		"invalid allergen relationship": {Name: "Coffee", Allergens: []models.CatalogItemAllergenInput{{AllergenID: "40000000-0000-4000-8000-000000000001", Relationship: "unknown"}}},
+		"duplicate allergen": {
+			Name: "Coffee",
+			Allergens: []models.CatalogItemAllergenInput{
+				{AllergenID: "40000000-0000-4000-8000-000000000001", Relationship: "contains"},
+				{AllergenID: "40000000-0000-4000-8000-000000000001", Relationship: "may_contain"},
+			},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := normalizeCatalogItemInput(invalid); !errors.Is(err, ErrInvalidInput) {
@@ -56,5 +82,8 @@ func TestNormalizeCatalogItemInputUsesEmptyVariantArray(t *testing.T) {
 	}
 	if input.Variants == nil || len(input.Variants) != 0 {
 		t.Fatalf("variants = %#v, want non-nil empty slice", input.Variants)
+	}
+	if input.Allergens == nil || len(input.Allergens) != 0 {
+		t.Fatalf("allergens = %#v, want non-nil empty slice", input.Allergens)
 	}
 }

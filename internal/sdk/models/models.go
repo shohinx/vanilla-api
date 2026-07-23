@@ -194,26 +194,41 @@ type SpecialHourInput struct {
 }
 
 type CatalogItem struct {
-	ID           string               `json:"id"`
-	RestaurantID string               `json:"restaurant_id"`
-	Name         string               `json:"name"`
-	Description  string               `json:"description,omitempty"`
-	PriceCents   int                  `json:"price_cents"`
-	Variants     []CatalogItemVariant `json:"variants"`
-	Status       string               `json:"status"`
+	ID           string                `json:"id"`
+	RestaurantID string                `json:"restaurant_id"`
+	Name         string                `json:"name"`
+	Description  string                `json:"description,omitempty"`
+	PriceCents   int                   `json:"price_cents"`
+	Variants     []CatalogItemVariant  `json:"variants"`
+	Allergens    []CatalogItemAllergen `json:"allergens"`
+	Status       string                `json:"status"`
 }
 
 type CatalogItemInput struct {
-	Name        string               `json:"name"`
-	Description string               `json:"description,omitempty"`
-	PriceCents  int                  `json:"price_cents"`
-	Variants    []CatalogItemVariant `json:"variants"`
-	Status      string               `json:"status"`
+	Name        string                     `json:"name"`
+	Description string                     `json:"description,omitempty"`
+	PriceCents  int                        `json:"price_cents"`
+	Variants    []CatalogItemVariant       `json:"variants"`
+	Allergens   []CatalogItemAllergenInput `json:"allergens"`
+	Status      string                     `json:"status"`
 }
 
 type CatalogItemVariant struct {
 	Name       string `json:"name"`
 	PriceCents int    `json:"price_cents"`
+}
+
+type CatalogItemAllergen struct {
+	AllergenID   string `json:"allergen_id"`
+	Name         string `json:"name"`
+	Code         string `json:"code"`
+	Description  string `json:"description,omitempty"`
+	Relationship string `json:"relationship"`
+}
+
+type CatalogItemAllergenInput struct {
+	AllergenID   string `json:"allergen_id"`
+	Relationship string `json:"relationship"`
 }
 
 type Ingredient struct {
